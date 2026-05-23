@@ -1,0 +1,31 @@
+api:
+  provider: deepseek
+  apiKey: ${DEEPSEEK_API_KEY}
+  model: deepseek-v4-flash
+  maxTokens: 32768
+  temperature: 0.3
+  baseUrl: https://api.deepseek.com/v1
+context:
+  maxFiles: 100
+  maxTokens: 128000
+  autoDiscover: true
+  excludePatterns:
+    - node_modules/**
+    - dist/**
+    - .git/**
+    - '*.lock'
+    - '*.min.js'
+    - build/**
+agents:
+  family: full
+  orchestrate: true
+  reviewRequired: true
+  autoApply: false
+bmad:
+  enabled: true
+  templatesPath: .didev/bmad/templates
+  linkIssues: false
+output:
+  style: fancy
+  color: true
+  saveSessions: true

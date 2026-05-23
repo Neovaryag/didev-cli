@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# didev
+.didev/sessions
+.didev/secrets
+.env
+
+# claude
+.claude/
