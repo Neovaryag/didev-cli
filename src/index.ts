@@ -3,13 +3,16 @@ import 'dotenv/config';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import { printBanner } from './utils/banner.js';
+import { createRequire } from 'module';
+const _require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = _require('../package.json') as { version: string };
 
 const program = new Command();
 
 program
   .name('didev')
   .description('AI-powered development CLI using DeepSeek API')
-  .version('1.0.0')
+  .version(PKG_VERSION)
   .addHelpText('after', `
 ${chalk.bold('Examples:')}
   ${chalk.cyan('didev init')}                              Initialize didev in current project
@@ -283,7 +286,7 @@ const _isVersionFlag = _rawArgs.includes('--version') || _rawArgs.includes('-V')
 const _isBareInvocation = _rawArgs.length === 0;
 
 if (!_isVersionFlag && !_isBareInvocation) {
-  printBanner('1.0.0');
+  printBanner(PKG_VERSION);
 }
 
 // Bare `didev` (no args) → open interactive shell immediately

@@ -1,6 +1,9 @@
 import * as readline from 'readline';
 import chalk from 'chalk';
+import { createRequire } from 'module';
 import { logger } from '../../utils/logger.js';
+const _require = createRequire(import.meta.url);
+const { version: PKG_VERSION } = _require('../../../package.json') as { version: string };
 import { loadConfig, getApiKey, setConfigValue } from '../../core/config.js';
 import { initClient } from '../../core/api.js';
 import type { Message, Tool } from '../../core/api.js';
@@ -169,7 +172,7 @@ function printHeader(projectName: string, model: string, apiKey: string): void {
     ? chalk.green('● ') + chalk.gray(`${apiKey.slice(0, 6)}…${apiKey.slice(-4)}`)
     : chalk.red('● key missing');
 
-  const line1 = chalk.bold.cyan('didev') + chalk.gray(' v1.0.0') +
+  const line1 = chalk.bold.cyan('didev') + chalk.gray(` v${PKG_VERSION}`) +
     chalk.gray('  ·  ') + chalk.white(projectName) +
     chalk.gray('  ·  ') + chalk.yellow(model) +
     chalk.gray('  ·  ') + keyStatus;
