@@ -220,7 +220,7 @@ async function promptApplyChanges(
     return;
   }
 
-  // Build file list
+  // Build file list for box
   const fileLines: string[] = [];
   for (const [filePath, content] of pendingWrites) {
     const original = await readProjectFile(filePath, rootDir).catch(() => '');
@@ -240,51 +240,49 @@ async function promptApplyChanges(
     )
   );
 
-  rl.pause();
-  try {
-    const { action } = await inquirer.prompt([{
-      type: 'list',
-      name: 'action',
-      message: 'Что сделать с изменениями?',
-      choices: [
-        { name: chalk.green('✓  Применить сейчас'), value: 'apply' },
-        { name: chalk.cyan('👁  Посмотреть diff → применить'), value: 'diff' },
-        { name: chalk.red('✗  Отклонить'), value: 'reject' },
-        { name: chalk.yellow('⚡ Принимать всё автоматически в этом сеансе'), value: 'auto' },
-      ],
-    }]);
+  // Use rl.question() — same readline session, no raw-mode conflict with Git Bash
+  const hint =
+    chalk.bold('  [Enter/y]') + chalk.green(' Применить') +
+    chalk.bold('  [d]') + chalk.cyan(' Diff') +
+    chalk.bold('  [n]') + chalk.red(' Отклонить') +
+    chalk.bold('  [a]') + chalk.yellow(' Авто-режим');
+  console.log(hint + '\n');
 
-    if (action === 'reject') {
-      pendingWrites.clear();
-      logger.info('Изменения отклонены');
+  const answer = await new Promise<string>(resolve => {
+    rl.question(chalk.gray('  ▸ '), ans => resolve(ans.trim().toLowerCase()));
+  });
 
-    } else if (action === 'diff') {
-      for (const [filePath, content] of pendingWrites) {
-        const original = await readProjectFile(filePath, rootDir).catch(() => '');
-        console.log('');
-        logger.bold(`── ${filePath} ──`);
-        console.log(renderDiff(filePath, original, content));
-      }
-      for (const [filePath, content] of pendingWrites) {
-        await writeProjectFile(filePath, content, rootDir);
-        console.log(`  ${chalk.green('✓')} ${filePath}`);
-      }
-      pendingWrites.clear();
+  const choice = answer || 'y';
 
-    } else {
-      if (action === 'auto') {
-        onAutoApply();
-        logger.success('Автоприменение включено — все изменения в этом сеансе будут применяться сразу');
-      }
-      for (const [filePath, content] of pendingWrites) {
-        await writeProjectFile(filePath, content, rootDir);
-        console.log(`  ${chalk.green('✓')} ${filePath}`);
-      }
-      pendingWrites.clear();
+  if (choice === 'n') {
+    pendingWrites.clear();
+    console.log(chalk.dim('  Изменения отклонены'));
+
+  } else if (choice === 'd') {
+    for (const [filePath, content] of pendingWrites) {
+      const original = await readProjectFile(filePath, rootDir).catch(() => '');
+      console.log('');
+      logger.bold(`── ${filePath} ──`);
+      console.log(renderDiff(filePath, original, content));
     }
-  } finally {
-    rl.resume();
+    for (const [filePath, content] of pendingWrites) {
+      await writeProjectFile(filePath, content, rootDir);
+      console.log(`  ${chalk.green('✓')} ${filePath}`);
+    }
+    pendingWrites.clear();
+
+  } else {
+    if (choice === 'a') {
+      onAutoApply();
+      console.log(chalk.yellow('  ⚡ Авто-режим включён — все файлы в этом сеансе применяются сразу'));
+    }
+    for (const [filePath, content] of pendingWrites) {
+      await writeProjectFile(filePath, content, rootDir);
+      console.log(`  ${chalk.green('✓')} ${filePath}`);
+    }
+    pendingWrites.clear();
   }
+  console.log('');
 }
 
 export async function runChat(options: ChatOptions = {}): Promise<void> {
