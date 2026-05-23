@@ -4,7 +4,7 @@ import { logger } from '../../utils/logger.js';
 import { loadConfig, getApiKey, setConfigValue } from '../../core/config.js';
 import { initClient } from '../../core/api.js';
 import type { Message, Tool } from '../../core/api.js';
-import { collectProjectContext, contextToSystemPrompt } from '../../core/context.js';
+import { collectProjectContext, contextToSystemPrompt, loadContextDocument } from '../../core/context.js';
 import { createSession, saveSession, loadSession, listSessions } from '../../core/session.js';
 import { readProjectFile, writeProjectFile, renderDiff } from '../../core/file-manager.js';
 import { getDiff } from '../../utils/git.js';
@@ -186,6 +186,8 @@ function printHelp(): void {
     ['/apply',          'применить отложенные изменения файлов'],
     ['/files',          'показать файлы в контексте и ожидающие запись'],
     ['/add <file>',     'добавить файл в контекст'],
+    ['/context',        'показать базу знаний проекта'],
+    ['/context update', 'обновить базу знаний через AI'],
     ['/sessions',       'список сохранённых сессий'],
     ['/save <name>',    'сохранить текущую сессию'],
     ['/load <name>',    'загрузить сессию'],
@@ -266,11 +268,13 @@ export async function runChat(options: ChatOptions = {}): Promise<void> {
   const rootDir = process.cwd();
   const projectCtx = await collectProjectContext(rootDir);
   const model = options.model ?? config.api.model;
+  const contextDoc = await loadContextDocument(rootDir);
 
   let systemPrompt = `You are didev, an expert AI coding assistant integrated with the developer's project.
 You have access to tools to read files, search code, and make changes.
 
 ${contextToSystemPrompt(projectCtx)}
+${contextDoc ? `\n## Project Knowledge Base\n${contextDoc}` : ''}
 
 Guidelines:
 - Be concise and practical
@@ -440,6 +444,40 @@ Guidelines:
           }
           console.log('');
           continue;
+
+        // ── context ──
+        case 'context': {
+          if (arg === 'update') {
+            rl.pause();
+            try {
+              const { runContextUpdate } = await import('./context.js');
+              await runContextUpdate({ model });
+              // Reload context doc into system prompt
+              const newDoc = await loadContextDocument(rootDir);
+              if (newDoc) {
+                messages[0].content = messages[0].content.replace(
+                  /\n## Project Knowledge Base\n[\s\S]*?(?=\n\nGuidelines:|\n\nGuidelines:)/,
+                  `\n## Project Knowledge Base\n${newDoc}`
+                );
+                if (!messages[0].content.includes('## Project Knowledge Base')) {
+                  messages[0].content = messages[0].content.replace(
+                    '\n\nGuidelines:',
+                    `\n\n## Project Knowledge Base\n${newDoc}\n\nGuidelines:`
+                  );
+                }
+                logger.success('База знаний перезагружена в текущую сессию');
+              }
+            } catch (e) {
+              logger.error(`Ошибка обновления: ${(e as Error).message}`);
+            } finally {
+              rl.resume();
+            }
+          } else {
+            const { runContextShow } = await import('./context.js');
+            await runContextShow();
+          }
+          continue;
+        }
 
         // ── add ──
         case 'add':

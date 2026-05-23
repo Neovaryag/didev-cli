@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import boxen from 'boxen';
 import inquirer from 'inquirer';
 import { logger } from '../utils/logger.js';
-import { collectProjectContext } from '../core/context.js';
+import { collectProjectContext, loadContextDocument } from '../core/context.js';
 import { loadConfig, getApiKey } from '../core/config.js';
 import { initClient } from '../core/api.js';
 import type { AgentResult, AgentOptions } from './base-agent.js';
@@ -146,6 +146,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
 
   const model = options.model ?? config.api.model;
   const projectCtx = await collectProjectContext(rootDir);
+  const contextDocument = await loadContextDocument(rootDir) ?? undefined;
 
   // Connect MCP servers before agents start — shared via singleton McpManager
   const mcp = await initMcp(config.mcp?.servers ?? []);
@@ -186,6 +187,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     rootDir,
     task: options.task,
     dryRun: confirmWrites,
+    contextDocument,
   };
 
   function trackFileChanges(fileChanges: AgentResult['fileChanges']): void {

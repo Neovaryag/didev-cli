@@ -7,6 +7,7 @@ import { logger } from '../../utils/logger.js';
 import { collectProjectContext } from '../../core/context.js';
 import { loadConfig, saveConfig } from '../../core/config.js';
 import type { DidevConfig } from '../../core/config.js';
+import { generateContextDocument } from './context.js';
 
 async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
@@ -158,8 +159,21 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
 
   await saveConfig(config, rootDir);
 
-  // Create context.md
-  const contextMd = context ? generateContextMd(context, projectType) : `# Project Context\n\nProject type: ${projectType}\n`;
+  // Create context.md — AI-generated if key is available, otherwise a template
+  let contextMd: string;
+  if (apiKey) {
+    spinner.text = 'Генерирую базу знаний проекта через AI...';
+    spinner.start();
+    try {
+      contextMd = await generateContextDocument(rootDir, apiKey, config.api.model);
+      spinner.succeed('База знаний проекта создана (.didev/context.md)');
+    } catch {
+      spinner.warn('Не удалось сгенерировать базу знаний — создан шаблон');
+      contextMd = context ? generateContextMd(context, projectType) : `# Project Context\n\nProject type: ${projectType}\n`;
+    }
+  } else {
+    contextMd = context ? generateContextMd(context, projectType) : `# Project Context\n\nProject type: ${projectType}\n`;
+  }
   await writeFile(join(didevDir, 'context.md'), contextMd, 'utf-8');
 
   // Create .gitignore entry
@@ -178,6 +192,7 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
   if (!apiKey) {
     logger.newline();
     logger.warn('API key not set. Run: ' + chalk.cyan('didev config set DEEPSEEK_API_KEY=sk-xxx'));
+    logger.dim('Then generate project knowledge base: ' + chalk.cyan('didev context update'));
   }
 }
 

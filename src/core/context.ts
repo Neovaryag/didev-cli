@@ -226,6 +226,18 @@ export async function loadFilesForContext(
   return result;
 }
 
+export async function loadContextDocument(rootDir = process.cwd()): Promise<string | null> {
+  const docPath = join(rootDir, '.didev', 'context.md');
+  try {
+    const content = await readFile(docPath, 'utf-8');
+    // Return null if it's the empty template (user hasn't generated it yet)
+    if (content.includes('<!-- Describe what this project does -->')) return null;
+    return content.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function discoverRelevantFiles(
   query: string,
   rootDir: string,

@@ -44,6 +44,8 @@ export interface AgentOptions {
   maxRounds?: number;
   /** When true, write_file calls are queued in pendingWrites instead of written immediately */
   dryRun?: boolean;
+  /** Pre-generated project knowledge base document from .didev/context.md */
+  contextDocument?: string;
 }
 
 export const AGENT_TOOLS: Tool[] = [
@@ -138,7 +140,10 @@ export abstract class BaseAgent {
 
     const spinner = logger.spinner({ text: chalk.gray('Working...'), color: 'magenta' }).start();
 
-    const systemPrompt = this.buildSystemPrompt(projectContext, task);
+    const baseSystemPrompt = this.buildSystemPrompt(projectContext, task);
+    const systemPrompt = options.contextDocument
+      ? `${baseSystemPrompt}\n\n## Project Knowledge Base\n${options.contextDocument}`
+      : baseSystemPrompt;
     const userMessage = this.buildUserMessage(task, previousResults);
 
     const messages: Message[] = [

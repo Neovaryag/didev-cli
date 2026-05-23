@@ -14,6 +14,7 @@ program
 ${chalk.bold('Examples:')}
   ${chalk.cyan('didev init')}                              Initialize didev in current project
   ${chalk.cyan('didev config set DEEPSEEK_API_KEY=sk-x')} Set API key
+  ${chalk.cyan('didev context update')}                    Generate project knowledge base (AI)
   ${chalk.cyan('didev chat')}                              Start AI chat with project context
   ${chalk.cyan('didev agent "Add user auth via JWT"')}     Run AI agent family
   ${chalk.cyan('didev review')}                            Review changed files
@@ -112,6 +113,34 @@ program
     const { runRefactor } = await import('./cli/commands/refactor.js');
     await runRefactor(instruction, opts);
   });
+
+// ── context ───────────────────────────────────────────────────────────────────
+const contextCmd = program
+  .command('context')
+  .description('Manage project knowledge base (.didev/context.md)');
+
+contextCmd
+  .command('update')
+  .description('Generate or regenerate project knowledge base using AI')
+  .option('-m, --model <model>', 'Model to use')
+  .action(async (opts) => {
+    const { runContextUpdate } = await import('./cli/commands/context.js');
+    await runContextUpdate(opts);
+  });
+
+contextCmd
+  .command('show')
+  .description('Show current project knowledge base')
+  .action(async () => {
+    const { runContextShow } = await import('./cli/commands/context.js');
+    await runContextShow();
+  });
+
+// Default context action — show if no subcommand
+contextCmd.action(async () => {
+  const { runContextShow } = await import('./cli/commands/context.js');
+  await runContextShow();
+});
 
 // ── bmad ──────────────────────────────────────────────────────────────────────
 const bmadCmd = program
