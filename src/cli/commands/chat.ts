@@ -1,5 +1,6 @@
 import * as readline from 'readline';
 import chalk from 'chalk';
+import boxen from 'boxen';
 import { createRequire } from 'module';
 import { logger } from '../../utils/logger.js';
 const _require = createRequire(import.meta.url);
@@ -208,46 +209,81 @@ function printHelp(): void {
   console.log('');
 }
 
-async function applyPendingWrites(
+async function promptApplyChanges(
   pendingWrites: Map<string, string>,
-  rootDir: string
+  rootDir: string,
+  rl: readline.Interface,
+  onAutoApply: () => void
 ): Promise<void> {
   if (pendingWrites.size === 0) {
     logger.info('Нет ожидающих изменений');
     return;
   }
 
-  console.log('');
-  console.log(chalk.bold(`  Изменения (${pendingWrites.size} файл(ов)):`));
-
+  // Build file list
+  const fileLines: string[] = [];
   for (const [filePath, content] of pendingWrites) {
     const original = await readProjectFile(filePath, rootDir).catch(() => '');
     const isNew = !original;
     const lines = content.split('\n').length;
-    if (isNew) {
-      console.log(`  ${chalk.green('+')} ${chalk.white(filePath)} ${chalk.gray(`(новый, ${lines} строк)`)}`);
-    } else {
-      console.log(`  ${chalk.yellow('~')} ${chalk.white(filePath)}`);
-      console.log(renderDiff(filePath, original, content));
-    }
+    const tag = isNew ? chalk.green('+') : chalk.yellow('~');
+    const label = isNew ? chalk.green('новый') : chalk.yellow('изменён');
+    fileLines.push(`  ${tag} ${chalk.white(filePath)}  ${chalk.gray(`${lines} стр · ${label}`)}`);
   }
 
   console.log('');
-  const { confirm } = await inquirer.prompt([{
-    type: 'confirm',
-    name: 'confirm',
-    message: `Применить ${pendingWrites.size} изменение(й)?`,
-    default: true,
-  }]);
+  console.log(
+    boxen(
+      chalk.bold.yellow(`✏️  Подготовлено ${pendingWrites.size} файл(а)`) + '\n\n' +
+      fileLines.join('\n'),
+      { padding: { top: 0, bottom: 0, left: 1, right: 2 }, borderColor: 'yellow', borderStyle: 'round' }
+    )
+  );
 
-  if (confirm) {
-    for (const [filePath, content] of pendingWrites) {
-      await writeProjectFile(filePath, content, rootDir);
-      logger.success(`Записан: ${filePath}`);
+  rl.pause();
+  try {
+    const { action } = await inquirer.prompt([{
+      type: 'list',
+      name: 'action',
+      message: 'Что сделать с изменениями?',
+      choices: [
+        { name: chalk.green('✓  Применить сейчас'), value: 'apply' },
+        { name: chalk.cyan('👁  Посмотреть diff → применить'), value: 'diff' },
+        { name: chalk.red('✗  Отклонить'), value: 'reject' },
+        { name: chalk.yellow('⚡ Принимать всё автоматически в этом сеансе'), value: 'auto' },
+      ],
+    }]);
+
+    if (action === 'reject') {
+      pendingWrites.clear();
+      logger.info('Изменения отклонены');
+
+    } else if (action === 'diff') {
+      for (const [filePath, content] of pendingWrites) {
+        const original = await readProjectFile(filePath, rootDir).catch(() => '');
+        console.log('');
+        logger.bold(`── ${filePath} ──`);
+        console.log(renderDiff(filePath, original, content));
+      }
+      for (const [filePath, content] of pendingWrites) {
+        await writeProjectFile(filePath, content, rootDir);
+        console.log(`  ${chalk.green('✓')} ${filePath}`);
+      }
+      pendingWrites.clear();
+
+    } else {
+      if (action === 'auto') {
+        onAutoApply();
+        logger.success('Автоприменение включено — все изменения в этом сеансе будут применяться сразу');
+      }
+      for (const [filePath, content] of pendingWrites) {
+        await writeProjectFile(filePath, content, rootDir);
+        console.log(`  ${chalk.green('✓')} ${filePath}`);
+      }
+      pendingWrites.clear();
     }
-    pendingWrites.clear();
-  } else {
-    logger.info('Изменения отменены');
+  } finally {
+    rl.resume();
   }
 }
 
@@ -304,6 +340,8 @@ Guidelines:
   const messages: Message[] = [{ role: 'system', content: systemPrompt }];
   const contextFiles: string[] = options.file ? [options.file] : [];
   const pendingWrites = new Map<string, string>();
+
+  let autoApply = false;
 
   let session = createSession('chat', { model });
   session.messages = messages;
@@ -506,7 +544,7 @@ Guidelines:
 
         // ── apply ──
         case 'apply':
-          await applyPendingWrites(pendingWrites, rootDir);
+          await promptApplyChanges(pendingWrites, rootDir, rl, () => { autoApply = true; });
           continue;
 
         // ── save ──
@@ -614,7 +652,16 @@ Guidelines:
       messages.push(...updatedMsgs);
 
       if (pendingWrites.size > 0) {
-        logger.warn(`${pendingWrites.size} файл(ов) ожидают записи → /apply`);
+        if (autoApply) {
+          console.log('');
+          for (const [filePath, content] of pendingWrites) {
+            await writeProjectFile(filePath, content, rootDir);
+            console.log(`  ${chalk.green('✓')} ${filePath}`);
+          }
+          pendingWrites.clear();
+        } else {
+          await promptApplyChanges(pendingWrites, rootDir, rl, () => { autoApply = true; });
+        }
       }
 
       // Auto-save session
