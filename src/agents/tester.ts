@@ -6,6 +6,7 @@ export class TesterAgent extends BaseAgent {
   readonly name = 'Tester';
   readonly role = 'Test Writing';
   readonly emoji = '🧪';
+  readonly description = 'Генерирует юнит и интеграционные тесты, покрывает критические пути и edge cases';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     const testFramework = ctx.dependencies.dev.includes('vitest') ? 'Vitest'
@@ -46,6 +47,7 @@ export class PerformanceAuditorAgent extends BaseAgent {
   readonly name = 'Performance Auditor';
   readonly role = 'Performance Analysis';
   readonly emoji = '⚡';
+  readonly description = 'Ищет узкие места, N+1 запросы, утечки памяти и возможности кэширования';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a Performance Engineer analyzing a ${ctx.type} ${ctx.framework} application.

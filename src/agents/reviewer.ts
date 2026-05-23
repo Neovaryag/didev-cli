@@ -6,6 +6,7 @@ export class ReviewerAgent extends BaseAgent {
   readonly name = 'Reviewer';
   readonly role = 'Code Review & Quality';
   readonly emoji = '🔍';
+  readonly description = 'Проверяет код на качество, SOLID, потенциальные баги и соответствие паттернам проекта';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a senior Code Reviewer with expertise in ${ctx.language} and ${ctx.framework}.
@@ -43,6 +44,7 @@ export class SecurityAuditorAgent extends BaseAgent {
   readonly name = 'Security Auditor';
   readonly role = 'Security Analysis';
   readonly emoji = '🔒';
+  readonly description = 'Аудит OWASP Top 10: SQL injection, broken auth, sensitive data exposure, XSS';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a Security Engineer performing a security audit.

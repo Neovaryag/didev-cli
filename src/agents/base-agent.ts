@@ -34,6 +34,12 @@ export interface FileChange {
   description?: string;
 }
 
+export interface StepInfo {
+  current: number;
+  total: number;
+  parallel?: boolean;
+}
+
 export interface AgentOptions {
   client: DeepSeekClient;
   model: string;
@@ -46,6 +52,8 @@ export interface AgentOptions {
   dryRun?: boolean;
   /** Pre-generated project knowledge base document from .didev/context.md */
   contextDocument?: string;
+  /** Position in the pipeline for display */
+  stepInfo?: StepInfo;
 }
 
 export const AGENT_TOOLS: Tool[] = [
@@ -128,17 +136,42 @@ export abstract class BaseAgent {
   abstract readonly name: string;
   abstract readonly role: string;
   abstract readonly emoji: string;
+  abstract readonly description: string;
   protected abstract buildSystemPrompt(ctx: ProjectContext, task: string): string;
 
   protected pendingWrites = new Map<string, { content: string; description?: string }>();
+
+  private toolLabel(name: string, args: Record<string, unknown>): string {
+    switch (name) {
+      case 'read_file':       return `📖 Читаю:    ${args['path']}`;
+      case 'write_file':      return `✏️  Пишу:     ${args['path']}`;
+      case 'list_directory':  return `📂 Смотрю:   ${args['path'] ?? '.'}`;
+      case 'search_files':    return `🔍 Ищу:      "${args['query']}"`;
+      case 'git_diff':        return `🔀 Git diff`;
+      default:                return `⚙️  ${name}`;
+    }
+  }
+
+  private printStepBanner(stepInfo?: StepInfo): void {
+    const step = stepInfo
+      ? chalk.bold.white(`Шаг ${stepInfo.current}/${stepInfo.total}`) + (stepInfo.parallel ? chalk.yellow('  ⚡ параллельно') : '')
+      : '';
+    const divider = chalk.cyan('─'.repeat(54));
+    console.log(divider);
+    if (step) console.log(`  ${chalk.gray('▶')}  ${step}   ${this.emoji} ${chalk.bold(this.name)}`);
+    else      console.log(`  ${this.emoji} ${chalk.bold(this.name)}`);
+    console.log(`     ${chalk.dim(this.role)}`);
+    console.log(`     ${chalk.dim('↳')} ${chalk.dim(this.description)}`);
+    console.log('');
+  }
 
   async run(options: AgentOptions): Promise<AgentResult> {
     const start = Date.now();
     const { client, model, projectContext, rootDir, task, previousResults, dryRun } = options;
 
-    logger.agentHeader(this.emoji + ' ' + this.name, this.role);
+    this.printStepBanner(options.stepInfo);
 
-    const spinner = logger.spinner({ text: chalk.gray('Working...'), color: 'magenta' }).start();
+    const spinner = logger.spinner({ text: chalk.gray('Анализирую...'), color: 'magenta' }).start();
 
     const baseSystemPrompt = this.buildSystemPrompt(projectContext, task);
     const systemPrompt = options.contextDocument
@@ -165,6 +198,12 @@ export abstract class BaseAgent {
         messages,
         allTools,
         async (name, args) => {
+          // Print tool call as persistent line, then restart spinner
+          if (spinner.isSpinning) spinner.stop();
+          console.log('  ' + chalk.dim(this.toolLabel(name, args)));
+          spinner.text = chalk.gray('Думаю...');
+          spinner.start();
+
           if (mcp.isMcpTool(name)) return mcp.call(name, args);
           return this.executeToolCall(name, args, rootDir, fileChanges, dryRun ? pendingWrites : undefined);
         },
@@ -173,7 +212,7 @@ export abstract class BaseAgent {
         options.maxRounds ?? 10
       );
 
-      output = finalContent;
+      output = finalContent ?? '';
       spinner.stop();
 
       // Display output
@@ -198,6 +237,12 @@ export abstract class BaseAgent {
       }
 
       void finalMsgs;
+
+      const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+      console.log(
+        chalk.green('  ✓') + '  ' + this.emoji + ' ' + chalk.bold(this.name) +
+        chalk.dim(`  завершён за ${elapsed}s`)
+      );
     } catch (e) {
       spinner.fail(chalk.red(`${this.name} завершился с ошибкой: ${(e as Error).message}`));
       throw e;

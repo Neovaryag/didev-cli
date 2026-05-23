@@ -6,6 +6,7 @@ export class AnalystAgent extends BaseAgent {
   readonly name = 'Analyst';
   readonly role = 'Requirements Analysis';
   readonly emoji = '🎯';
+  readonly description = 'Разбивает задачу на user stories и критерии приёмки — даёт архитектору чёткое ТЗ';
 
   protected buildSystemPrompt(ctx: ProjectContext, task: string): string {
     return `You are an expert Software Analyst specializing in requirements analysis and user story creation.
@@ -34,6 +35,7 @@ export class FrontendAnalystAgent extends BaseAgent {
   readonly name = 'Frontend Analyst';
   readonly role = 'Frontend Requirements & User Stories';
   readonly emoji = '🎯';
+  readonly description = 'Определяет UI/UX требования, компоненты и состояния — перед тем как архитектор спроектирует структуру';
 
   protected buildSystemPrompt(ctx: ProjectContext, task: string): string {
     return `You are an expert Frontend Analyst specializing in UI/UX requirements.
@@ -56,6 +58,7 @@ export class BackendAnalystAgent extends BaseAgent {
   readonly name = 'Backend Analyst';
   readonly role = 'Backend Requirements & API Contracts';
   readonly emoji = '🎯';
+  readonly description = 'Определяет API-эндпоинты, модели данных и бизнес-правила — перед проектированием архитектуры';
 
   protected buildSystemPrompt(ctx: ProjectContext, task: string): string {
     return `You are an expert Backend Analyst specializing in API design and system requirements.

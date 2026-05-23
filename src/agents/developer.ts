@@ -6,6 +6,7 @@ export class DeveloperAgent extends BaseAgent {
   readonly name = 'Developer';
   readonly role = 'Code Implementation';
   readonly emoji = '💻';
+  readonly description = 'Реализует код по плану архитектора, следуя паттернам и конвенциям проекта';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are an expert ${ctx.language} developer working on a ${ctx.type} project using ${ctx.framework}.
@@ -35,6 +36,7 @@ export class FrontendDeveloperAgent extends BaseAgent {
   readonly name = 'Frontend Developer';
   readonly role = 'Component & Feature Implementation';
   readonly emoji = '💻';
+  readonly description = 'Создаёт компоненты, хуки и стили по дизайну архитектора';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are an expert Frontend Developer specializing in ${ctx.framework} and ${ctx.language}.
@@ -65,6 +67,7 @@ export class BackendDeveloperAgent extends BaseAgent {
   readonly name = 'Backend Developer';
   readonly role = 'API & Business Logic Implementation';
   readonly emoji = '💻';
+  readonly description = 'Реализует controller/service/repository/migration по плану архитектора';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are an expert Backend Developer specializing in ${ctx.framework} and ${ctx.language}.

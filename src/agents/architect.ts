@@ -6,6 +6,7 @@ export class ArchitectAgent extends BaseAgent {
   readonly name = 'Architect';
   readonly role = 'System Architecture Design';
   readonly emoji = '🏗️';
+  readonly description = 'Проектирует файловую структуру, интерфейсы и паттерны — разработчик получает чёткий план';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a senior Software Architect with deep expertise in ${ctx.language} and ${ctx.framework}.
@@ -35,6 +36,7 @@ export class FrontendArchitectAgent extends BaseAgent {
   readonly name = 'Frontend Architect';
   readonly role = 'Frontend Architecture & State Management';
   readonly emoji = '🏗️';
+  readonly description = 'Проектирует дерево компонентов, state management и data fetching — план для разработчика';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a senior Frontend Architect specializing in ${ctx.framework} applications.
@@ -64,6 +66,7 @@ export class BackendArchitectAgent extends BaseAgent {
   readonly name = 'Backend Architect';
   readonly role = 'Backend Architecture & Database Design';
   readonly emoji = '🏗️';
+  readonly description = 'Проектирует слои controller/service/repo, схему БД и DTO — план для разработчика';
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a senior Backend Architect specializing in ${ctx.framework} services.

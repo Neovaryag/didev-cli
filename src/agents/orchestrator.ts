@@ -114,14 +114,23 @@ function filterPipeline(steps: PipelineStep[], skip: string[]): PipelineStep[] {
     .filter((s): s is PipelineStep => s !== null);
 }
 
-function formatPipelineLabel(steps: PipelineStep[]): string {
-  return steps
-    .map(step =>
-      Array.isArray(step)
-        ? step.map(a => `${a.emoji} ${a.name}`).join(' + ')
-        : `${step.emoji} ${step.name}`
-    )
-    .join(' → ');
+function formatPipelineBox(steps: PipelineStep[], family: string, mode: string): string {
+  const lines: string[] = [];
+  const header = chalk.bold.cyan('🚀 didev agent family');
+  const meta = chalk.gray(`${family} · ${mode} · ${steps.length} шагов`);
+  lines.push(header);
+  lines.push(meta);
+  lines.push('');
+  steps.forEach((step, i) => {
+    const num = chalk.bold.white(`${i + 1}.`);
+    if (Array.isArray(step)) {
+      lines.push(`  ${num}  ${chalk.yellow('⚡ параллельно')}  [${step.length} агента]`);
+      step.forEach(a => lines.push(`       ${a.emoji} ${chalk.dim(a.name)}  ${chalk.dim('—')} ${chalk.dim(a.description)}`));
+    } else {
+      lines.push(`  ${num}  ${step.emoji} ${chalk.bold(step.name)}  ${chalk.dim('—')} ${chalk.dim(step.description)}`);
+    }
+  });
+  return lines.join('\n');
 }
 
 export async function runOrchestration(options: OrchestrationOptions): Promise<OrchestrationResult> {
@@ -163,12 +172,14 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     : pipeline;
 
   // Display orchestration plan
+  const resolvedFamily = family === 'auto'
+    ? (projectCtx.type === 'frontend' ? 'frontend' : projectCtx.type === 'backend' ? 'backend' : 'fullstack')
+    : family;
   logger.newline();
   console.log(
     boxen(
-      chalk.bold.cyan('🚀 didev agent') + '\n\n' +
-      chalk.white(`Task: ${options.task}`) + '\n\n' +
-      chalk.gray(`Pipeline: ${formatPipelineLabel(filteredPipeline)}`),
+      chalk.white(`Задача: ${options.task}`) + '\n\n' +
+      formatPipelineBox(filteredPipeline, resolvedFamily, mode),
       { padding: 1, borderColor: 'cyan', borderStyle: 'double' }
     )
   );
@@ -199,23 +210,37 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
   // Collect all pending writes across all agents (dry-run mode)
   const allPendingWrites = new Map<string, { content: string; description?: string }>();
 
-  for (const step of filteredPipeline) {
+  const totalSteps = filteredPipeline.length;
+
+  for (let stepIdx = 0; stepIdx < filteredPipeline.length; stepIdx++) {
+    const step = filteredPipeline[stepIdx];
+    const stepNum = stepIdx + 1;
     const snapshot = agentResults.length > 0 ? [...agentResults] : undefined;
 
     if (Array.isArray(step)) {
-      // Parallel stage — all agents get the same snapshot of previous results
+      // Parallel stage header
+      const names = step.map(a => `${a.emoji} ${a.name}`).join('  ');
+      console.log(chalk.cyan('─'.repeat(54)));
+      console.log(
+        `  ${chalk.gray('▶')}  ${chalk.bold.white(`Шаг ${stepNum}/${totalSteps}`)}  ${chalk.yellow('⚡ параллельный запуск')}  [${step.length} агента]`
+      );
+      console.log(`     ${chalk.dim(names)}`);
+      console.log('');
+
       const settled = await Promise.allSettled(
-        step.map(agent => agent.run({ ...agentOptions, previousResults: snapshot }))
+        step.map(agent => agent.run({
+          ...agentOptions,
+          previousResults: snapshot,
+          stepInfo: { current: stepNum, total: totalSteps, parallel: true },
+        }))
       );
       for (const outcome of settled) {
         if (outcome.status === 'fulfilled') {
           agentResults.push(outcome.value);
           trackFileChanges(outcome.value.fileChanges);
-          // Collect pending writes from dry-run agents
           for (const [path, entry] of outcome.value.pendingWrites) {
             allPendingWrites.set(path, entry);
           }
-          logger.dim(`  Готово за ${(outcome.value.duration / 1000).toFixed(1)}s`);
         } else {
           logger.error(`Агент завершился с ошибкой: ${(outcome.reason as Error).message}`);
         }
@@ -224,13 +249,16 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     } else {
       // Sequential step
       try {
-        const result = await step.run({ ...agentOptions, previousResults: snapshot });
+        const result = await step.run({
+          ...agentOptions,
+          previousResults: snapshot,
+          stepInfo: { current: stepNum, total: totalSteps },
+        });
         agentResults.push(result);
         trackFileChanges(result.fileChanges);
         for (const [path, entry] of result.pendingWrites) {
           allPendingWrites.set(path, entry);
         }
-        logger.dim(`  Готово за ${(result.duration / 1000).toFixed(1)}s`);
         logger.newline();
       } catch (e) {
         logger.error(`Агент ${step.name} завершился с ошибкой: ${(e as Error).message}`);
