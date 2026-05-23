@@ -322,8 +322,12 @@ Guidelines:
   const prompt = chalk.cyan('you') + chalk.gray(' › ');
   const askQuestion = (): Promise<string> =>
     new Promise((resolve, reject) => {
-      rl.question(prompt, resolve);
-      rl.once('close', () => reject(new Error('closed')));
+      const onClose = () => reject(new Error('closed'));
+      rl.once('close', onClose);
+      rl.question(prompt, (answer) => {
+        rl.removeListener('close', onClose);
+        resolve(answer);
+      });
     });
 
   while (true) {
@@ -570,6 +574,7 @@ Guidelines:
     let currentToolLabel = '';
     const spinner = logger.spinner({ text: chalk.gray('Думаю...'), color: 'cyan' }).start();
 
+    rl.pause(); // prevent stray stdin events from closing readline during async work
     try {
       console.log(''); // blank line before response
 
@@ -625,6 +630,8 @@ Guidelines:
       if (spinner.isSpinning) spinner.fail(chalk.red('Ошибка: ' + (e as Error).message));
       else console.error('\n' + chalk.red('Ошибка: ' + (e as Error).message));
       messages.pop(); // remove failed user message
+    } finally {
+      rl.resume(); // restore stdin after async work completes
     }
   }
 
