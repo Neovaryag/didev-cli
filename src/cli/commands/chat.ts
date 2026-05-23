@@ -458,12 +458,13 @@ Guidelines:
               // Reload context doc into system prompt
               const newDoc = await loadContextDocument(rootDir);
               if (newDoc) {
-                messages[0].content = messages[0].content.replace(
+                const cur = messages[0].content ?? '';
+                messages[0].content = cur.replace(
                   /\n## Project Knowledge Base\n[\s\S]*?(?=\n\nGuidelines:|\n\nGuidelines:)/,
                   `\n## Project Knowledge Base\n${newDoc}`
                 );
-                if (!messages[0].content.includes('## Project Knowledge Base')) {
-                  messages[0].content = messages[0].content.replace(
+                if (!(messages[0].content ?? '').includes('## Project Knowledge Base')) {
+                  messages[0].content = (messages[0].content ?? '').replace(
                     '\n\nGuidelines:',
                     `\n\n## Project Knowledge Base\n${newDoc}\n\nGuidelines:`
                   );

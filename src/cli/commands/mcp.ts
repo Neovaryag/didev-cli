@@ -201,7 +201,7 @@ async function enrichWithAI(
       },
     ], model, { temperature: 0 });
 
-    const match = res.content.match(/\[[\s\S]+\]/);
+    const match = (res.content ?? '').match(/\[[\s\S]+\]/);
     if (!match) return rawVars;
 
     const enriched = JSON.parse(match[0]) as Array<{ name: string; description: string; required: boolean }>;

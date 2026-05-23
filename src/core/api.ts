@@ -3,7 +3,7 @@ import { withTimeout, retryWithBackoff } from '../utils/resilience.js';
 
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: string | null;
   reasoning_content?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
@@ -45,10 +45,15 @@ export interface DeepSeekConfig {
 }
 
 export interface ChatResponse {
-  content: string;
+  content: string | null;
   reasoningContent?: string;
   toolCalls?: ToolCall[];
   usage?: { promptTokens: number; completionTokens: number };
+}
+
+// Thinking models do not support temperature/top_p/etc.
+function isThinkingModel(model: string): boolean {
+  return model.includes('reasoner') || model.includes('v4-pro') || model.includes('v4-flash');
 }
 
 export class DeepSeekClient {
@@ -73,20 +78,34 @@ export class DeepSeekClient {
     };
   }
 
+  private buildBody(
+    model: string,
+    messages: Message[],
+    options: ChatOptions,
+    extra: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    const thinking = isThinkingModel(model);
+    return {
+      model,
+      messages: messages.map(msg => this.serializeMessage(msg)),
+      max_tokens: options.maxTokens ?? this.defaultMaxTokens,
+      // temperature is unsupported for thinking models — omit it
+      ...(!thinking ? { temperature: options.temperature ?? this.defaultTemperature } : {}),
+      ...extra,
+    };
+  }
+
   async chat(
     messages: Message[],
     model?: string,
     options: ChatOptions = {}
   ): Promise<ChatResponse> {
-    const body = {
-      model: model ?? this.defaultModel,
-      messages: messages.map(this.serializeMessage),
-      max_tokens: options.maxTokens ?? this.defaultMaxTokens,
-      temperature: options.temperature ?? this.defaultTemperature,
+    const resolvedModel = model ?? this.defaultModel;
+    const body = this.buildBody(resolvedModel, messages, options, {
       ...(options.tools ? { tools: options.tools, tool_choice: options.toolChoice ?? 'auto' } : {}),
-    };
+    });
 
-    logger.debug(`POST ${this.baseUrl}/chat/completions model=${body.model} msgs=${messages.length}`);
+    logger.debug(`POST ${this.baseUrl}/chat/completions model=${resolvedModel} msgs=${messages.length}`);
 
     const res = await retryWithBackoff(
       () => withTimeout(
@@ -122,7 +141,7 @@ export class DeepSeekClient {
 
     const choice = data.choices[0];
     return {
-      content: choice.message.content ?? '',
+      content: choice.message.content,
       reasoningContent: choice.message.reasoning_content ?? undefined,
       toolCalls: choice.message.tool_calls,
       usage: data.usage
@@ -131,18 +150,21 @@ export class DeepSeekClient {
     };
   }
 
-  async *stream(
+  // Streams response, yields content chunks, and also collects reasoning_content + tool_calls.
+  async *streamFull(
     messages: Message[],
     model?: string,
     options: ChatOptions = {}
-  ): AsyncGenerator<string, void, unknown> {
-    const body = {
-      model: model ?? this.defaultModel,
-      messages: messages.map(this.serializeMessage),
-      max_tokens: options.maxTokens ?? this.defaultMaxTokens,
-      temperature: options.temperature ?? this.defaultTemperature,
+  ): AsyncGenerator<
+    { type: 'content'; chunk: string } | { type: 'done'; reasoningContent?: string; toolCalls?: ToolCall[] },
+    void,
+    unknown
+  > {
+    const resolvedModel = model ?? this.defaultModel;
+    const body = this.buildBody(resolvedModel, messages, options, {
       stream: true,
-    };
+      ...(options.tools ? { tools: options.tools, tool_choice: options.toolChoice ?? 'auto' } : {}),
+    });
 
     const res = await withTimeout(
       fetch(`${this.baseUrl}/chat/completions`, {
@@ -167,6 +189,8 @@ export class DeepSeekClient {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let reasoningContent = '';
+    const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
 
     while (true) {
       const { done, value } = await withTimeout(reader.read(), 60_000, 'Stream chunk');
@@ -180,18 +204,58 @@ export class DeepSeekClient {
         const trimmed = line.trim();
         if (!trimmed.startsWith('data:')) continue;
         const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') return;
+        if (data === '[DONE]') {
+          const toolCalls = toolCallsMap.size > 0
+            ? [...toolCallsMap.entries()]
+                .sort(([a], [b]) => a - b)
+                .map(([, tc]) => ({
+                  id: tc.id,
+                  type: 'function' as const,
+                  function: { name: tc.name, arguments: tc.arguments },
+                }))
+            : undefined;
+          yield { type: 'done', reasoningContent: reasoningContent || undefined, toolCalls };
+          return;
+        }
         try {
           const parsed = JSON.parse(data) as {
-            choices: Array<{ delta: { content?: string | null } }>;
+            choices: Array<{
+              delta: {
+                content?: string | null;
+                reasoning_content?: string | null;
+                tool_calls?: Array<{
+                  index: number;
+                  id?: string;
+                  function?: { name?: string; arguments?: string };
+                }>;
+              };
+            }>;
           };
-          const delta = parsed.choices[0]?.delta?.content;
-          if (delta) yield delta;
+          const delta = parsed.choices[0]?.delta;
+          if (!delta) continue;
+
+          if (delta.reasoning_content) {
+            reasoningContent += delta.reasoning_content;
+          }
+          if (delta.content) {
+            yield { type: 'content', chunk: delta.content };
+          }
+          if (delta.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const existing = toolCallsMap.get(tc.index) ?? { id: '', name: '', arguments: '' };
+              toolCallsMap.set(tc.index, {
+                id: tc.id ?? existing.id,
+                name: (existing.name) + (tc.function?.name ?? ''),
+                arguments: existing.arguments + (tc.function?.arguments ?? ''),
+              });
+            }
+          }
         } catch {
           // skip malformed SSE lines
         }
       }
     }
+    yield { type: 'done', reasoningContent: reasoningContent || undefined };
   }
 
   // Run a tool-calling loop until the model stops requesting tools
@@ -210,16 +274,15 @@ export class DeepSeekClient {
       const response = await this.chat(msgs, model, { ...options, tools });
       round++;
 
-      const assistantMsg: Message = {
+      msgs.push({
         role: 'assistant',
         content: response.content,
         reasoning_content: response.reasoningContent,
         tool_calls: response.toolCalls,
-      };
-      msgs.push(assistantMsg);
+      });
 
       if (!response.toolCalls || response.toolCalls.length === 0) {
-        return { messages: msgs, finalContent: response.content };
+        return { messages: msgs, finalContent: response.content ?? '' };
       }
 
       for (const tc of response.toolCalls) {
@@ -231,19 +294,15 @@ export class DeepSeekClient {
         } catch (e) {
           result = `Error: ${(e as Error).message}`;
         }
-        msgs.push({
-          role: 'tool',
-          tool_call_id: tc.id,
-          content: result,
-        });
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: result });
       }
     }
 
-    return { messages: msgs, finalContent: msgs[msgs.length - 1]?.content ?? '' };
+    return { messages: msgs, finalContent: (msgs[msgs.length - 1]?.content ?? '') as string };
   }
 
-  // Same as runToolLoop but streams the final (no-tool-call) response via onChunk.
-  // Intermediate tool-call rounds use non-streaming; only the last response is streamed.
+  // Streams responses, executes tool calls, streams final answer in real-time.
+  // Single API call per round — no double-billing.
   async runToolLoopStream(
     messages: Message[],
     tools: Tool[],
@@ -260,35 +319,34 @@ export class DeepSeekClient {
     while (round < maxRounds) {
       round++;
 
-      // Use non-streaming to detect tool calls
-      const probe = await this.chat(msgs, model, { ...options, tools });
+      let finalContent = '';
+      let reasoningContent: string | undefined;
+      let toolCalls: ToolCall[] | undefined;
 
-      if (!probe.toolCalls || probe.toolCalls.length === 0) {
-        // Final response — stream it for real-time output
-        let finalContent = '';
-        try {
-          for await (const chunk of this.stream(msgs, model, options)) {
-            finalContent += chunk;
-            onChunk(chunk);
-          }
-        } catch {
-          // Streaming failed — fall back to already-received content
-          finalContent = probe.content;
-          onChunk(probe.content);
+      for await (const event of this.streamFull(msgs, model, { ...options, tools })) {
+        if (event.type === 'content') {
+          finalContent += event.chunk;
+          onChunk(event.chunk);
+        } else {
+          reasoningContent = event.reasoningContent;
+          toolCalls = event.toolCalls;
         }
-        const content = finalContent || probe.content;
-        msgs.push({ role: 'assistant', content, reasoning_content: probe.reasoningContent });
-        return { messages: msgs, finalContent: content };
       }
 
-      // Has tool calls — execute them (non-streaming)
+      if (!toolCalls || toolCalls.length === 0) {
+        msgs.push({ role: 'assistant', content: finalContent, reasoning_content: reasoningContent });
+        return { messages: msgs, finalContent };
+      }
+
+      // Has tool calls — reasoning_content MUST be passed back per spec
       msgs.push({
         role: 'assistant',
-        content: probe.content,
-        tool_calls: probe.toolCalls,
+        content: finalContent || null,
+        reasoning_content: reasoningContent,
+        tool_calls: toolCalls,
       });
 
-      for (const tc of probe.toolCalls) {
+      for (const tc of toolCalls) {
         let result: string;
         try {
           const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
@@ -302,12 +360,12 @@ export class DeepSeekClient {
       }
     }
 
-    return { messages: msgs, finalContent: msgs[msgs.length - 1]?.content ?? '' };
+    return { messages: msgs, finalContent: (msgs[msgs.length - 1]?.content ?? '') as string };
   }
 
   private serializeMessage(msg: Message): Record<string, unknown> {
     const out: Record<string, unknown> = { role: msg.role, content: msg.content };
-    if (msg.reasoning_content) out['reasoning_content'] = msg.reasoning_content;
+    if (msg.reasoning_content != null) out['reasoning_content'] = msg.reasoning_content;
     if (msg.tool_call_id) out['tool_call_id'] = msg.tool_call_id;
     if (msg.tool_calls) out['tool_calls'] = msg.tool_calls;
     if (msg.name) out['name'] = msg.name;
