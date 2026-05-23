@@ -672,9 +672,17 @@ Guidelines:
 
       void finalContent; // captured via onChunk above
     } catch (e) {
-      if (spinner.isSpinning) spinner.fail(chalk.red('Ошибка: ' + (e as Error).message));
-      else console.error('\n' + chalk.red('Ошибка: ' + (e as Error).message));
-      messages.pop(); // remove failed user message
+      const errMsg = (e as Error).message;
+      if (spinner.isSpinning) spinner.fail(chalk.red('Ошибка: ' + errMsg));
+      else console.error('\n' + chalk.red('Ошибка: ' + errMsg));
+      // Keep the user message in history so context is not lost on transient errors.
+      // Only drop it on definitive API errors (4xx except 429/402 retryable).
+      const isHardError = /API error [45]\d\d/.test(errMsg) && !/402|429/.test(errMsg);
+      if (isHardError) {
+        messages.pop();
+      } else {
+        console.log(chalk.yellow('  ↩  Ваш запрос сохранён — введите что-нибудь для повторной попытки, или /clear для сброса'));
+      }
     } finally {
       rl.resume(); // restore stdin after async work completes
     }

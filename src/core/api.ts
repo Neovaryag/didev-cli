@@ -166,14 +166,17 @@ export class DeepSeekClient {
       ...(options.tools ? { tools: options.tools, tool_choice: options.toolChoice ?? 'auto' } : {}),
     });
 
-    const res = await withTimeout(
-      fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: this.headers,
-        body: JSON.stringify(body),
-      }),
-      30_000,
-      'DeepSeek stream connect'
+    const res = await retryWithBackoff(
+      () => withTimeout(
+        fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: this.headers,
+          body: JSON.stringify(body),
+        }),
+        90_000,
+        'DeepSeek stream connect'
+      ),
+      { maxAttempts: 3, label: 'DeepSeek stream connect' }
     );
 
     if (!res.ok) {
@@ -193,7 +196,7 @@ export class DeepSeekClient {
     const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
 
     while (true) {
-      const { done, value } = await withTimeout(reader.read(), 60_000, 'Stream chunk');
+      const { done, value } = await withTimeout(reader.read(), 120_000, 'Stream chunk');
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
