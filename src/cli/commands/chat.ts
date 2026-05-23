@@ -7,8 +7,9 @@ const _require = createRequire(import.meta.url);
 const { version: PKG_VERSION } = _require('../../../package.json') as { version: string };
 import { loadConfig, getApiKey, setConfigValue } from '../../core/config.js';
 import { initClient } from '../../core/api.js';
-import type { Message, Tool } from '../../core/api.js';
+import type { Message, Tool, DeepSeekClient } from '../../core/api.js';
 import { collectProjectContext, contextToSystemPrompt, loadContextDocument } from '../../core/context.js';
+import type { ProjectContext } from '../../core/context.js';
 import { createSession, saveSession, loadSession, listSessions } from '../../core/session.js';
 import { readProjectFile, writeProjectFile, renderDiff } from '../../core/file-manager.js';
 import { getDiff } from '../../utils/git.js';
@@ -214,11 +215,12 @@ async function promptApplyChanges(
   rootDir: string,
   rl: readline.Interface,
   onAutoApply: () => void
-): Promise<void> {
+): Promise<string[]> {
   if (pendingWrites.size === 0) {
     logger.info('Нет ожидающих изменений');
-    return;
+    return [];
   }
+  const appliedFiles: string[] = [];
 
   // Build file list for box
   const fileLines: string[] = [];
@@ -267,6 +269,7 @@ async function promptApplyChanges(
     }
     for (const [filePath, content] of pendingWrites) {
       await writeProjectFile(filePath, content, rootDir);
+      appliedFiles.push(filePath);
       console.log(`  ${chalk.green('✓')} ${filePath}`);
     }
     pendingWrites.clear();
@@ -278,11 +281,61 @@ async function promptApplyChanges(
     }
     for (const [filePath, content] of pendingWrites) {
       await writeProjectFile(filePath, content, rootDir);
+      appliedFiles.push(filePath);
       console.log(`  ${chalk.green('✓')} ${filePath}`);
     }
     pendingWrites.clear();
   }
   console.log('');
+  return appliedFiles;
+}
+
+async function showPostApplyPrompt(
+  appliedFiles: string[],
+  rl: readline.Interface,
+  client: DeepSeekClient,
+  model: string,
+  projectCtx: ProjectContext,
+  rootDir: string,
+  contextDocument?: string
+): Promise<void> {
+  const hint =
+    chalk.bold('  [t]') + chalk.cyan(' Написать тесты') +
+    chalk.gray('  ·  ') +
+    chalk.bold('[r]') + chalk.yellow(' Code review') +
+    chalk.gray('  ·  ') +
+    chalk.bold('[Enter]') + chalk.gray(' Продолжить');
+  console.log(hint + '\n');
+
+  const answer = await new Promise<string>(resolve => {
+    rl.question(chalk.gray('  ▸ '), ans => resolve(ans.trim().toLowerCase()));
+  });
+
+  if (!answer || (answer !== 't' && answer !== 'r')) return;
+
+  const { TesterAgent } = await import('../../agents/tester.js');
+  const { ReviewerAgent } = await import('../../agents/reviewer.js');
+
+  const agent = answer === 't' ? new TesterAgent() : new ReviewerAgent();
+  const fileList = appliedFiles.join(', ');
+  const task = answer === 't'
+    ? `Write tests for the following changed files: ${fileList}`
+    : `Review the following changed files: ${fileList}`;
+
+  const result = await agent.run({
+    client,
+    model,
+    projectContext: projectCtx,
+    rootDir,
+    task,
+    dryRun: true,
+    contextDocument,
+  });
+
+  if (result.pendingWrites.size > 0) {
+    const flat = new Map([...result.pendingWrites.entries()].map(([k, v]) => [k, v.content]));
+    await promptApplyChanges(flat, rootDir, rl, () => {});
+  }
 }
 
 export async function runChat(options: ChatOptions = {}): Promise<void> {
@@ -541,9 +594,13 @@ Guidelines:
           continue;
 
         // ── apply ──
-        case 'apply':
-          await promptApplyChanges(pendingWrites, rootDir, rl, () => { autoApply = true; });
+        case 'apply': {
+          const applied = await promptApplyChanges(pendingWrites, rootDir, rl, () => { autoApply = true; });
+          if (applied.length > 0) {
+            await showPostApplyPrompt(applied, rl, client, model, projectCtx, rootDir, contextDoc ?? undefined);
+          }
           continue;
+        }
 
         // ── save ──
         case 'save':
@@ -652,13 +709,19 @@ Guidelines:
       if (pendingWrites.size > 0) {
         if (autoApply) {
           console.log('');
+          const autoApplied: string[] = [];
           for (const [filePath, content] of pendingWrites) {
             await writeProjectFile(filePath, content, rootDir);
+            autoApplied.push(filePath);
             console.log(`  ${chalk.green('✓')} ${filePath}`);
           }
           pendingWrites.clear();
+          await showPostApplyPrompt(autoApplied, rl, client, model, projectCtx, rootDir, contextDoc ?? undefined);
         } else {
-          await promptApplyChanges(pendingWrites, rootDir, rl, () => { autoApply = true; });
+          const applied = await promptApplyChanges(pendingWrites, rootDir, rl, () => { autoApply = true; });
+          if (applied.length > 0) {
+            await showPostApplyPrompt(applied, rl, client, model, projectCtx, rootDir, contextDoc ?? undefined);
+          }
         }
       }
 
