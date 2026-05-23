@@ -4,6 +4,7 @@ import { withTimeout, retryWithBackoff } from '../utils/resilience.js';
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  reasoning_content?: string;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
   name?: string;
@@ -45,6 +46,7 @@ export interface DeepSeekConfig {
 
 export interface ChatResponse {
   content: string;
+  reasoningContent?: string;
   toolCalls?: ToolCall[];
   usage?: { promptTokens: number; completionTokens: number };
 }
@@ -111,6 +113,7 @@ export class DeepSeekClient {
       choices: Array<{
         message: {
           content: string | null;
+          reasoning_content?: string | null;
           tool_calls?: ToolCall[];
         };
       }>;
@@ -120,6 +123,7 @@ export class DeepSeekClient {
     const choice = data.choices[0];
     return {
       content: choice.message.content ?? '',
+      reasoningContent: choice.message.reasoning_content ?? undefined,
       toolCalls: choice.message.tool_calls,
       usage: data.usage
         ? { promptTokens: data.usage.prompt_tokens, completionTokens: data.usage.completion_tokens }
@@ -209,6 +213,7 @@ export class DeepSeekClient {
       const assistantMsg: Message = {
         role: 'assistant',
         content: response.content,
+        reasoning_content: response.reasoningContent,
         tool_calls: response.toolCalls,
       };
       msgs.push(assistantMsg);
@@ -272,7 +277,7 @@ export class DeepSeekClient {
           onChunk(probe.content);
         }
         const content = finalContent || probe.content;
-        msgs.push({ role: 'assistant', content });
+        msgs.push({ role: 'assistant', content, reasoning_content: probe.reasoningContent });
         return { messages: msgs, finalContent: content };
       }
 
@@ -302,6 +307,7 @@ export class DeepSeekClient {
 
   private serializeMessage(msg: Message): Record<string, unknown> {
     const out: Record<string, unknown> = { role: msg.role, content: msg.content };
+    if (msg.reasoning_content) out['reasoning_content'] = msg.reasoning_content;
     if (msg.tool_call_id) out['tool_call_id'] = msg.tool_call_id;
     if (msg.tool_calls) out['tool_calls'] = msg.tool_calls;
     if (msg.name) out['name'] = msg.name;
