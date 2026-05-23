@@ -18,6 +18,7 @@ export interface AgentResult {
   output: string;
   artifacts: AgentArtifact[];
   fileChanges: FileChange[];
+  pendingWrites: Map<string, { content: string; description?: string }>;
   duration: number;
 }
 
@@ -41,6 +42,8 @@ export interface AgentOptions {
   task: string;
   previousResults?: AgentResult[];
   maxRounds?: number;
+  /** When true, write_file calls are queued in pendingWrites instead of written immediately */
+  dryRun?: boolean;
 }
 
 export const AGENT_TOOLS: Tool[] = [
@@ -129,7 +132,7 @@ export abstract class BaseAgent {
 
   async run(options: AgentOptions): Promise<AgentResult> {
     const start = Date.now();
-    const { client, model, projectContext, rootDir, task, previousResults } = options;
+    const { client, model, projectContext, rootDir, task, previousResults, dryRun } = options;
 
     logger.agentHeader(this.emoji + ' ' + this.name, this.role);
 
@@ -145,6 +148,8 @@ export abstract class BaseAgent {
 
     let output = '';
     const fileChanges: FileChange[] = [];
+    // In dry-run mode writes go here; otherwise they are applied immediately
+    const pendingWrites = new Map<string, { content: string; description?: string }>();
 
     // Merge built-in agent tools with any connected MCP tools
     const mcp = getMcpManager();
@@ -156,7 +161,7 @@ export abstract class BaseAgent {
         allTools,
         async (name, args) => {
           if (mcp.isMcpTool(name)) return mcp.call(name, args);
-          return this.executeToolCall(name, args, rootDir, fileChanges);
+          return this.executeToolCall(name, args, rootDir, fileChanges, dryRun ? pendingWrites : undefined);
         },
         model,
         { temperature: 0.3 },
@@ -171,15 +176,25 @@ export abstract class BaseAgent {
       console.log(chalk.white(output));
       logger.newline();
 
-      // Show file changes summary
+      // Show file changes summary (written files)
       if (fileChanges.length > 0) {
-        logger.dim(`  Created/modified ${fileChanges.length} file(s):`);
+        logger.dim(`  Создано/изменено ${fileChanges.length} файл(ов):`);
         for (const fc of fileChanges) {
           logger.step('✓', chalk.green(`  ${fc.path}`) + chalk.gray(fc.description ? ` — ${fc.description}` : ''));
         }
       }
+
+      // Show pending writes summary (dry-run mode)
+      if (pendingWrites.size > 0) {
+        logger.dim(`  Ожидают записи (dry-run): ${pendingWrites.size} файл(ов)`);
+        for (const [path] of pendingWrites) {
+          logger.step('○', chalk.yellow(`  ${path}`));
+        }
+      }
+
+      void finalMsgs;
     } catch (e) {
-      spinner.fail(chalk.red(`${this.name} failed: ${(e as Error).message}`));
+      spinner.fail(chalk.red(`${this.name} завершился с ошибкой: ${(e as Error).message}`));
       throw e;
     }
 
@@ -192,6 +207,7 @@ export abstract class BaseAgent {
       output,
       artifacts,
       fileChanges,
+      pendingWrites,
       duration: Date.now() - start,
     };
   }
@@ -216,13 +232,14 @@ export abstract class BaseAgent {
     name: string,
     args: Record<string, unknown>,
     rootDir: string,
-    fileChanges: FileChange[]
+    fileChanges: FileChange[],
+    pendingWrites?: Map<string, { content: string; description?: string }>
   ): Promise<string> {
     switch (name) {
       case 'read_file': {
         try {
           const content = await readProjectFile(String(args['path']), rootDir);
-          return content.slice(0, 400_000); // ~100K tokens, within 1M context
+          return content.slice(0, 400_000);
         } catch (e) {
           return `Error: ${(e as Error).message}`;
         }
@@ -232,6 +249,12 @@ export abstract class BaseAgent {
         const path = String(args['path']);
         const content = String(args['content']);
         const description = args['description'] ? String(args['description']) : undefined;
+
+        if (pendingWrites) {
+          // Dry-run: queue for later confirmation
+          pendingWrites.set(path, { content, description });
+          return `File ${path} queued for writing (dry-run mode)`;
+        }
 
         try {
           await writeProjectFile(path, content, rootDir);

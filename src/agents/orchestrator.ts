@@ -1,5 +1,6 @@
 import chalk from 'chalk';
 import boxen from 'boxen';
+import inquirer from 'inquirer';
 import { logger } from '../utils/logger.js';
 import { collectProjectContext } from '../core/context.js';
 import { loadConfig, getApiKey } from '../core/config.js';
@@ -13,6 +14,7 @@ import { ReviewerAgent, SecurityAuditorAgent } from './reviewer.js';
 import { TesterAgent, PerformanceAuditorAgent } from './tester.js';
 import type { ProjectContext } from '../core/context.js';
 import { initMcp } from '../core/mcp.js';
+import { readProjectFile, writeProjectFile, renderDiff } from '../core/file-manager.js';
 
 export type AgentFamily = 'frontend' | 'backend' | 'fullstack' | 'auto';
 export type OrchestrationMode = 'full' | 'light' | 'developer-only';
@@ -27,6 +29,8 @@ export interface OrchestrationOptions {
   model?: string;
   rootDir?: string;
   skipAgents?: string[];
+  /** When true, agents queue writes and ask for confirmation before applying (default: true) */
+  confirmWrites?: boolean;
 }
 
 export interface OrchestrationResult {
@@ -172,12 +176,16 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
   const agentResults: AgentResult[] = [];
   const allFileChanges: Map<string, 'created' | 'modified'> = new Map();
 
+  // confirmWrites defaults to true — always ask before touching the filesystem
+  const confirmWrites = options.confirmWrites !== false;
+
   const agentOptions: Omit<AgentOptions, 'previousResults'> = {
     client,
     model,
     projectContext: projectCtx,
     rootDir,
     task: options.task,
+    dryRun: confirmWrites,
   };
 
   function trackFileChanges(fileChanges: AgentResult['fileChanges']): void {
@@ -185,6 +193,9 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
       allFileChanges.set(fc.path, allFileChanges.has(fc.path) ? 'modified' : 'created');
     }
   }
+
+  // Collect all pending writes across all agents (dry-run mode)
+  const allPendingWrites = new Map<string, { content: string; description?: string }>();
 
   for (const step of filteredPipeline) {
     const snapshot = agentResults.length > 0 ? [...agentResults] : undefined;
@@ -198,9 +209,13 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
         if (outcome.status === 'fulfilled') {
           agentResults.push(outcome.value);
           trackFileChanges(outcome.value.fileChanges);
-          logger.dim(`  Completed in ${(outcome.value.duration / 1000).toFixed(1)}s`);
+          // Collect pending writes from dry-run agents
+          for (const [path, entry] of outcome.value.pendingWrites) {
+            allPendingWrites.set(path, entry);
+          }
+          logger.dim(`  Готово за ${(outcome.value.duration / 1000).toFixed(1)}s`);
         } else {
-          logger.error(`Agent failed: ${(outcome.reason as Error).message}`);
+          logger.error(`Агент завершился с ошибкой: ${(outcome.reason as Error).message}`);
         }
       }
       logger.newline();
@@ -210,12 +225,20 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
         const result = await step.run({ ...agentOptions, previousResults: snapshot });
         agentResults.push(result);
         trackFileChanges(result.fileChanges);
-        logger.dim(`  Completed in ${(result.duration / 1000).toFixed(1)}s`);
+        for (const [path, entry] of result.pendingWrites) {
+          allPendingWrites.set(path, entry);
+        }
+        logger.dim(`  Готово за ${(result.duration / 1000).toFixed(1)}s`);
         logger.newline();
       } catch (e) {
-        logger.error(`Agent ${step.name} failed: ${(e as Error).message}`);
+        logger.error(`Агент ${step.name} завершился с ошибкой: ${(e as Error).message}`);
       }
     }
+  }
+
+  // ── Preview & confirm file writes ────────────────────────────────────────
+  if (confirmWrites && allPendingWrites.size > 0) {
+    await confirmAndApplyWrites(allPendingWrites, rootDir, allFileChanges);
   }
 
   const filesCreated = [...allFileChanges.entries()].filter(([, v]) => v === 'created').map(([k]) => k);
@@ -234,6 +257,67 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     filesModified,
     summary,
   };
+}
+
+async function confirmAndApplyWrites(
+  pendingWrites: Map<string, { content: string; description?: string }>,
+  rootDir: string,
+  allFileChanges: Map<string, 'created' | 'modified'>
+): Promise<void> {
+  logger.newline();
+
+  const lines: string[] = [
+    chalk.bold.yellow('📝 Агенты подготовили изменения'),
+    '',
+    chalk.gray(`Файлов к записи: ${pendingWrites.size}`),
+    '',
+  ];
+
+  for (const [path, { description }] of pendingWrites) {
+    const exists = await readProjectFile(path, rootDir).then(() => true).catch(() => false);
+    const tag = exists ? chalk.yellow('~') : chalk.green('+');
+    const label = exists ? 'изменение' : 'новый файл';
+    lines.push(`  ${tag} ${chalk.white(path)}  ${chalk.gray(description ?? label)}`);
+  }
+
+  console.log(boxen(lines.join('\n'), { padding: 1, borderColor: 'yellow', borderStyle: 'round' }));
+  logger.newline();
+
+  // Show full diffs per file
+  const { showDiffs } = await inquirer.prompt([{
+    type: 'confirm',
+    name: 'showDiffs',
+    message: 'Показать diff изменений перед применением?',
+    default: true,
+  }]);
+
+  if (showDiffs) {
+    for (const [path, { content }] of pendingWrites) {
+      const original = await readProjectFile(path, rootDir).catch(() => '');
+      logger.newline();
+      logger.bold(`── ${path} ──`);
+      console.log(renderDiff(path, original, content));
+    }
+    logger.newline();
+  }
+
+  const { apply } = await inquirer.prompt([{
+    type: 'confirm',
+    name: 'apply',
+    message: `Применить ${pendingWrites.size} файл(ов)?`,
+    default: true,
+  }]);
+
+  if (apply) {
+    for (const [path, { content }] of pendingWrites) {
+      const existed = await readProjectFile(path, rootDir).then(() => true).catch(() => false);
+      await writeProjectFile(path, content, rootDir);
+      allFileChanges.set(path, existed ? 'modified' : 'created');
+      logger.success(`Записан: ${path}`);
+    }
+  } else {
+    logger.info('Изменения отклонены — файлы не тронуты');
+  }
 }
 
 function buildSummary(

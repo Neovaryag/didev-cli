@@ -92,26 +92,49 @@ async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
 }
 
+function isPlaceholderKey(key: string | undefined): boolean {
+  return !key || key.startsWith('${') || key.trim() === '';
+}
+
 export async function loadConfig(rootDir = process.cwd()): Promise<DidevConfig> {
   const localPath = configPath(rootDir);
   const globalPath = globalConfigPath();
 
   let config = structuredClone(DEFAULT_CONFIG);
+  let globalApiKey = '';
 
-  // Load global config first, then override with local
-  for (const path of [globalPath, localPath]) {
-    if (await exists(path)) {
-      try {
-        const text = await readFile(path, 'utf-8');
-        const loaded = yaml.load(text) as Partial<DidevConfig>;
-        config = deepMerge(config, loaded) as DidevConfig;
-      } catch (e) {
-        logger.warn(`Config parse error in ${path}: ${(e as Error).message}`);
+  // Load global config first
+  if (await exists(globalPath)) {
+    try {
+      const text = await readFile(globalPath, 'utf-8');
+      const loaded = yaml.load(text) as Partial<DidevConfig>;
+      // Preserve real API key from global config before local can override it
+      if (!isPlaceholderKey(loaded?.api?.apiKey)) {
+        globalApiKey = loaded.api!.apiKey;
       }
+      config = deepMerge(config, loaded) as DidevConfig;
+    } catch (e) {
+      logger.warn(`Config parse error in ${globalPath}: ${(e as Error).message}`);
     }
   }
 
-  // Environment variables override config file
+  // Load local config (may contain placeholder for apiKey — handled below)
+  if (await exists(localPath)) {
+    try {
+      const text = await readFile(localPath, 'utf-8');
+      const loaded = yaml.load(text) as Partial<DidevConfig>;
+      config = deepMerge(config, loaded) as DidevConfig;
+    } catch (e) {
+      logger.warn(`Config parse error in ${localPath}: ${(e as Error).message}`);
+    }
+  }
+
+  // If local config replaced a real key with a placeholder, restore the global key
+  if (isPlaceholderKey(config.api.apiKey) && globalApiKey) {
+    config.api.apiKey = globalApiKey;
+  }
+
+  // Environment variables always take highest priority
   const envKey = process.env['DEEPSEEK_API_KEY'];
   if (envKey) config.api.apiKey = envKey;
 

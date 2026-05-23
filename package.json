@@ -1,18 +1,28 @@
 {
   "name": "didev",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Professional AI-powered CLI for developers using DeepSeek API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "didev": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "scripts",
+    "templates",
+    "README.md"
+  ],
+  "author": "neovaryag",
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall.mjs",
+    "setup-path": "bash scripts/setup-path.sh",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

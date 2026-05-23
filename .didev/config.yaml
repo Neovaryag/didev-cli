@@ -29,3 +29,5 @@ output:
   style: fancy
   color: true
   saveSessions: true
+mcp:
+  servers: []

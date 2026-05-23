@@ -101,6 +101,9 @@ export class DeepSeekClient {
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
+      if (res.status === 402) {
+        throw new Error('💸 Закончился баланс на DeepSeek — пора закинуть деньжат на счёт!\n   👉 https://platform.deepseek.com/top_up');
+      }
       throw new Error(`DeepSeek API error ${res.status}: ${text}`);
     }
 
@@ -149,6 +152,9 @@ export class DeepSeekClient {
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
+      if (res.status === 402) {
+        throw new Error('💸 Закончился баланс на DeepSeek — пора закинуть деньжат на счёт!\n   👉 https://platform.deepseek.com/top_up');
+      }
       throw new Error(`DeepSeek API error ${res.status}: ${text}`);
     }
 
@@ -225,6 +231,69 @@ export class DeepSeekClient {
           tool_call_id: tc.id,
           content: result,
         });
+      }
+    }
+
+    return { messages: msgs, finalContent: msgs[msgs.length - 1]?.content ?? '' };
+  }
+
+  // Same as runToolLoop but streams the final (no-tool-call) response via onChunk.
+  // Intermediate tool-call rounds use non-streaming; only the last response is streamed.
+  async runToolLoopStream(
+    messages: Message[],
+    tools: Tool[],
+    executor: (name: string, args: Record<string, unknown>) => Promise<string>,
+    onChunk: (chunk: string) => void,
+    onToolCall?: (name: string) => void,
+    model?: string,
+    options: ChatOptions = {},
+    maxRounds = 10
+  ): Promise<{ messages: Message[]; finalContent: string }> {
+    const msgs = [...messages];
+    let round = 0;
+
+    while (round < maxRounds) {
+      round++;
+
+      // Use non-streaming to detect tool calls
+      const probe = await this.chat(msgs, model, { ...options, tools });
+
+      if (!probe.toolCalls || probe.toolCalls.length === 0) {
+        // Final response — stream it for real-time output
+        let finalContent = '';
+        try {
+          for await (const chunk of this.stream(msgs, model, options)) {
+            finalContent += chunk;
+            onChunk(chunk);
+          }
+        } catch {
+          // Streaming failed — fall back to already-received content
+          finalContent = probe.content;
+          onChunk(probe.content);
+        }
+        const content = finalContent || probe.content;
+        msgs.push({ role: 'assistant', content });
+        return { messages: msgs, finalContent: content };
+      }
+
+      // Has tool calls — execute them (non-streaming)
+      msgs.push({
+        role: 'assistant',
+        content: probe.content,
+        tool_calls: probe.toolCalls,
+      });
+
+      for (const tc of probe.toolCalls) {
+        let result: string;
+        try {
+          const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+          logger.debug(`Tool call: ${tc.function.name}(${JSON.stringify(args)})`);
+          onToolCall?.(tc.function.name);
+          result = await executor(tc.function.name, args);
+        } catch (e) {
+          result = `Error: ${(e as Error).message}`;
+        }
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content: result });
       }
     }
 

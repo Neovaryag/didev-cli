@@ -34,20 +34,38 @@ didev is a CLI tool that brings an entire team of specialized AI agents to your 
 ## Installation
 
 ```bash
-npm install -g didev-cli
+npm install -g didev
 ```
+
+Requirements: **Node.js 18+**
 
 ---
 
 ## Quick Start
 
 ```bash
+# 1. Install globally
+npm install -g didev
+
+# 2. Go to your project
 cd my-project
+
+# 3. Initialize didev
 didev init
-didev config set DEEPSEEK_API_KEY=sk-xxx
-didev agent "Add JWT authentication to Express API"
+
+# 4. Set your DeepSeek API key
+didev config set DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+
+# 5. Start chatting with your codebase
 didev chat
+
+# Or run the full AI agent pipeline on a task
+didev agent "Add JWT authentication to Express API"
 ```
+
+Get a DeepSeek API key at **[platform.deepseek.com](https://platform.deepseek.com)** → API Keys.
+
+> Running `didev` with no arguments opens interactive chat immediately.
 
 ---
 

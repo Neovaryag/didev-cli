@@ -247,10 +247,21 @@ async function gracefulShutdown(signal: string): Promise<void> {
 process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
 process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 
-// Show banner on every invocation except bare --version / -V
 const _rawArgs = process.argv.slice(2);
-if (!_rawArgs.includes('--version') && !_rawArgs.includes('-V')) {
+
+// Show banner only for subcommands (not for bare invocation or --version)
+const _isVersionFlag = _rawArgs.includes('--version') || _rawArgs.includes('-V');
+const _isBareInvocation = _rawArgs.length === 0;
+
+if (!_isVersionFlag && !_isBareInvocation) {
   printBanner('1.0.0');
+}
+
+// Bare `didev` (no args) → open interactive shell immediately
+if (_isBareInvocation) {
+  const { runChat } = await import('./cli/commands/chat.js');
+  await runChat();
+  process.exit(0);
 }
 
 program.parse();

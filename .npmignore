@@ -1,0 +1,9 @@
+src/
+node_modules/
+.didev/
+.claude/
+*.log
+*.map
+tsconfig.json
+.env
+.env.*

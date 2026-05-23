@@ -8,3 +8,9 @@ dist/
 
 # claude
 .claude/
+
+# npm publish credentials
+.npmrc
+
+# build artifacts
+*.tgz
