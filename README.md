@@ -5,6 +5,7 @@
 
 **Автор:** Симонов Михаил Сергеевич
 
+[![npm](https://img.shields.io/npm/v/didev)](https://www.npmjs.com/package/didev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org/)
 [![DeepSeek API](https://img.shields.io/badge/DeepSeek-API-cyan)](https://platform.deepseek.com)
 [![MCP Protocol](https://img.shields.io/badge/MCP-Protocol-green)](https://modelcontextprotocol.io)
@@ -100,7 +101,7 @@ API key stored in `~/.didev/config.yaml` — never committed to the project.
 ---
 
 ### `didev chat`
-Interactive REPL with full project context.
+Interactive REPL with full project context, token tracking, and shell execution.
 
 ```bash
 didev chat
@@ -108,7 +109,60 @@ didev chat -m deepseek-v4-pro
 didev chat -f src/api/routes.ts
 ```
 
-**Slash commands:** `/files` `/add <path>` `/apply` `/save` `/load <id>` `/sessions` `/clear` `/exit`
+**Slash commands:** `/menu` `/agent <task>` `/review` `/refactor` `/apply` `/files` `/add <path>` `/context` `/context update` `/save <name>` `/load <name>` `/sessions` `/config` `/clear` `/help` `/exit`
+
+#### Token counter
+
+Every response shows a real-time context usage bar:
+
+```text
+ctx [████░░░░░░░░░░░░░░░░] 12.3k/1.00M  +0.8k out  ⚡ cache 73%
+```
+
+- Bar fills as context grows toward the model's limit (1M for v4-flash, 64K for v4-pro)
+- `⚡ cache N%` shows the DeepSeek prompt cache hit rate — high % = faster + cheaper responses
+
+#### AI tools available in chat
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read any project file |
+| `write_file` | Propose file changes (requires confirmation) |
+| `list_files` | List files by glob pattern |
+| `search_code` | Full-text search across project files |
+| `git_diff` | Show git diff |
+| `run_command` | Execute shell commands in the project directory |
+
+The `run_command` tool lets the model run build/test commands directly:
+
+```text
+you › проверь запускается ли проект нет ли ошибок компиляции?
+▶  Запускаю: npm run build
+didev › Build successful — 0 errors, 2 warnings...
+```
+
+Works for any stack: `npm run build`, `mvn compile`, `./gradlew test`, `tsc --noEmit`, etc.
+
+#### File write confirmation
+
+When the AI proposes file changes, you get a 4-choice prompt:
+
+```text
+╭─────────────────────────────────────────╮
+│ ✏️  Подготовлено 3 файл(а)              │
+│   + src/auth/jwt.ts     новый           │
+│   ~ src/app.ts          изменён         │
+│   ~ src/config.ts       изменён         │
+╰─────────────────────────────────────────╯
+  [Enter/y] Применить  [d] Diff  [n] Отклонить  [a] Авто-режим
+```
+
+- **Enter/y** — apply all changes
+- **d** — show colored diff first, then apply
+- **n** — reject; you can then type corrections and the AI will try again
+- **a** — auto-mode: apply all future writes in this session without asking
+
+After applying, didev prompts whether to run tests or code review on the changed files.
 
 ---
 
@@ -131,6 +185,10 @@ didev agent --skip Tester "Quick feature"
 | `developer-only` | Developer only |
 
 > В режиме `full` стадия Reviewer и Tester выполняется **параллельно** — это сокращает общее время пайплайна.
+
+#### Agent feedback loop
+
+When you reject an agent's file writes, you can provide corrections inline. The Developer agent re-runs with your feedback (up to 3 rounds) without losing the Analyst/Architect context from earlier pipeline stages.
 
 ---
 
@@ -186,6 +244,8 @@ didev mcp remove my-server
 8. Tests MCP connection, lists available tools
 9. Saves to `.didev/config.yaml`
 
+MCP servers auto-start when you run `didev` — no manual setup needed per session. npx-based servers get 90 seconds on first run to download packages.
+
 ---
 
 ### `didev bmad`
@@ -198,6 +258,22 @@ didev bmad story
 didev bmad implement
 didev bmad review
 ```
+
+---
+
+## Build & Test Integration
+
+didev automatically detects your project's build system and offers to run checks after applying changes:
+
+| Project type | Detected by | Commands offered |
+|---|---|---|
+| Node.js / React | `package.json` | `npm run build`, `npm test`, `npm run lint` |
+| Angular | `angular.json` | `ng build`, `ng test`, `ng e2e` |
+| Maven | `pom.xml` | `mvn compile`, `mvn test` |
+| Gradle | `build.gradle` | `./gradlew build`, `./gradlew test` |
+| Frontend subdir | `src/package.json` | same as Node.js, in subdirectory |
+
+Build errors are parsed and surfaced with file/line references.
 
 ---
 
@@ -222,7 +298,7 @@ Think of it like a craftsman's workshop: each wall holds tools for a specific tr
 |-------|-----------|
 | BackendAnalyst | API design, data modeling |
 | BackendArchitect | Service architecture, DB schema |
-| BackendDeveloper | Node.js, Express, DB implementation |
+| BackendDeveloper | Node.js / Java / Python implementation |
 | SecurityAuditor | OWASP, auth review |
 | Reviewer | Error handling, code quality |
 | Tester | Unit + integration tests |
@@ -240,6 +316,8 @@ github__create_issue
 postgres__query
 filesystem__read_file
 ```
+
+MCP connections are managed by a singleton `McpManager` shared across chat and all agents in the same session. Calling `connectAll` multiple times is safe — already-connected servers are skipped automatically.
 
 ### Popular servers
 
@@ -280,6 +358,8 @@ filesystem__read_file
 | MCP env vars (DB URL, tokens) | `.didev/.env` | No (gitignored) |
 | Git tokens for private MCP repos | `~/.didev/.env` | No |
 | Project config | `.didev/config.yaml` with `${VAR}` placeholders | Yes |
+
+**Path traversal protection:** all `read_file` / `write_file` calls resolve the path against the project root and reject any path that escapes it (e.g. `../../etc/passwd` → `Access denied`).
 
 ---
 
@@ -344,49 +424,53 @@ DeepSeek API is 10–20× cheaper than OpenAI GPT-4o for equivalent tasks.
 src/
   index.ts              CLI entry (Commander.js) + graceful shutdown (SIGTERM/SIGINT)
   core/
-    api.ts              DeepSeek client (chat, stream, tool loop) — with retry + timeout
+    api.ts              DeepSeek client — chat, stream, tool loop, token usage tracking
     config.ts           Config load/save (global + local merge)
     context.ts          Project detection + file loading
-    file-manager.ts     Read/write/diff — path validation, 10MB limit
-    mcp.ts              MCP manager (connect, call, tool namespacing) — with timeout
+    file-manager.ts     Read/write/diff — assertSafePath, 10MB limit
+    mcp.ts              MCP manager — connect, call, tool namespacing, idempotent connectAll
+    post-apply.ts       Post-apply build/test detection and prompts
     session.ts          Chat session persistence
   agents/
-    base-agent.ts       BaseAgent abstract class + MCP integration
-    analyst.ts          Analyst variants
+    base-agent.ts       BaseAgent — tools: read/write/list/search/git_diff/run_command + MCP
+    analyst.ts          Analyst variants (frontend / backend / fullstack)
     architect.ts        Architect variants
     developer.ts        Developer variants
     reviewer.ts         Reviewer + SecurityAuditor
     tester.ts           Tester + PerformanceAuditor
-    orchestrator.ts     Pipeline builder + execution (parallel review phase)
+    orchestrator.ts     Pipeline builder — parallel review phase, feedback loop
   cli/commands/
     init.ts             didev init
     config.ts           didev config
-    chat.ts             didev chat (REPL + MCP)
+    chat.ts             didev chat — REPL, token counter, run_command, 4-choice confirm
     agent.ts            didev agent
-    review.ts           didev review
+    review.ts           didev review (read_file + write_file tools only)
     refactor.ts         didev refactor
     mcp.ts              didev mcp (add/list/test/remove)
+    menu.ts             interactive menu — initializes MCP if not yet done
   bmad/method.ts        BMad workflow
   utils/
     logger.ts           Styled output (chalk, ora, boxen)
     git.ts              Git diff helpers — with timeout
-    resilience.ts       withTimeout + retryWithBackoff utilities
+    resilience.ts       withTimeout + retryWithBackoff
+    build-runner.ts     Build script detection (npm/Maven/Gradle/Angular) + error parsing
+    token-counter.ts    Token estimation utilities
 ```
 
 ---
 
 ## Отказоустойчивость
 
-didev реализует несколько уровней защиты от сбоев:
-
 | Механизм | Где применяется | Детали |
 | -------- | --------------- | ------- |
-| **Таймауты** | API запросы, MCP, git | 30s на HTTP, 60s на stream-чанк, 10s на MCP connect, 15s на git |
-| **Retry с backoff** | DeepSeek API | 3 попытки, экспоненциальный backoff + jitter, только транзитные ошибки |
+| **Таймауты** | API запросы, MCP, git, run_command | 90s stream, 60s run_command, 20–90s MCP connect (90s для npx) |
+| **Retry с backoff** | DeepSeek API | 5 попыток, экспоненциальный backoff + jitter, только транзитные ошибки |
 | **Graceful shutdown** | SIGTERM / SIGINT | Закрывает MCP серверы, 5s на очистку, затем force exit |
 | **Параллельный review** | Orchestrator full mode | Reviewer + Tester запускаются одновременно |
 | **Лимит файлов** | file-manager | Отказ записи если файл >10MB |
-| **Безопасные пути** | file-manager | path.normalize(), блок `../` traversal |
+| **Безопасные пути** | file-manager | `assertSafePath` — блок path traversal (`../../`) |
+| **Идемпотентный MCP** | McpManager | `connectAll` безопасно вызывается несколько раз — дублей нет |
+| **Feedback loop** | Orchestrator | До 3 итераций Developer при отклонении изменений пользователем |
 | **Логирование ошибок** | config, context, session | Все `catch` логируют через `logger.warn/debug` |
 
 ---
