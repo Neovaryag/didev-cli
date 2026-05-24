@@ -1,5 +1,5 @@
 import { readFile, writeFile, mkdir, readdir, stat, access } from 'fs/promises';
-import { join, dirname, normalize, extname } from 'path';
+import { join, dirname, normalize, resolve, sep, extname } from 'path';
 import { createPatch } from 'diff';
 import chalk from 'chalk';
 import { logger } from '../utils/logger.js';
@@ -16,8 +16,17 @@ async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
 }
 
+function assertSafePath(path: string, rootDir: string): string {
+  const root = resolve(rootDir);
+  const full = resolve(root, path);
+  if (!full.startsWith(root + sep) && full !== root) {
+    throw new Error(`Access denied: path "${path}" escapes project root`);
+  }
+  return full;
+}
+
 export async function readProjectFile(path: string, rootDir = process.cwd()): Promise<string> {
-  const fullPath = join(rootDir, path);
+  const fullPath = assertSafePath(path, rootDir);
   return readFile(fullPath, 'utf-8');
 }
 
@@ -30,7 +39,7 @@ export async function writeProjectFile(
   if (byteLength > MAX_FILE_SIZE) {
     throw new Error(`Refusing to write ${path}: content is ${(byteLength / 1024 / 1024).toFixed(1)}MB (limit 10MB)`);
   }
-  const fullPath = join(rootDir, path);
+  const fullPath = assertSafePath(path, rootDir);
   await mkdir(dirname(fullPath), { recursive: true });
   await writeFile(fullPath, content, 'utf-8');
 }

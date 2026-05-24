@@ -54,7 +54,7 @@ const DEFAULT_CONFIG: DidevConfig = {
   },
   context: {
     maxFiles: 100,
-    maxTokens: 128000,  // 1M context window — можно передавать гораздо больше
+    maxTokens: 128000,  // max tokens for context loading; the model's context window itself is 1M
     autoDiscover: true,
     excludePatterns: ['node_modules/**', 'dist/**', '.git/**', '*.lock', '*.min.js'],
   },

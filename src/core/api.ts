@@ -217,84 +217,89 @@ export class DeepSeekClient {
     let streamUsage: TokenUsage | undefined;
     const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
 
-    while (true) {
-      const { done, value } = await withTimeout(reader.read(), 120_000, 'Stream chunk');
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await withTimeout(reader.read(), 120_000, 'Stream chunk');
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const data = trimmed.slice(5).trim();
-        if (data === '[DONE]') {
-          const toolCalls = toolCallsMap.size > 0
-            ? [...toolCallsMap.entries()]
-                .sort(([a], [b]) => a - b)
-                .map(([, tc]) => ({
-                  id: tc.id,
-                  type: 'function' as const,
-                  function: { name: tc.name, arguments: tc.arguments },
-                }))
-            : undefined;
-          yield { type: 'done', reasoningContent: reasoningContent || undefined, toolCalls, usage: streamUsage };
-          return;
-        }
-        try {
-          const parsed = JSON.parse(data) as {
-            choices: Array<{
-              delta: {
-                content?: string | null;
-                reasoning_content?: string | null;
-                tool_calls?: Array<{
-                  index: number;
-                  id?: string;
-                  function?: { name?: string; arguments?: string };
-                }>;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') {
+            const toolCalls = toolCallsMap.size > 0
+              ? [...toolCallsMap.entries()]
+                  .sort(([a], [b]) => a - b)
+                  .map(([, tc]) => ({
+                    id: tc.id,
+                    type: 'function' as const,
+                    function: { name: tc.name, arguments: tc.arguments },
+                  }))
+              : undefined;
+            yield { type: 'done', reasoningContent: reasoningContent || undefined, toolCalls, usage: streamUsage };
+            return;
+          }
+          try {
+            const parsed = JSON.parse(data) as {
+              choices: Array<{
+                delta: {
+                  content?: string | null;
+                  reasoning_content?: string | null;
+                  tool_calls?: Array<{
+                    index: number;
+                    id?: string;
+                    function?: { name?: string; arguments?: string };
+                  }>;
+                };
+              }>;
+              usage?: {
+                prompt_tokens: number;
+                completion_tokens: number;
+                total_tokens?: number;
+                prompt_cache_hit_tokens?: number;
+                prompt_cache_miss_tokens?: number;
               };
-            }>;
-            usage?: {
-              prompt_tokens: number;
-              completion_tokens: number;
-              total_tokens?: number;
-              prompt_cache_hit_tokens?: number;
-              prompt_cache_miss_tokens?: number;
             };
-          };
-          // usage-only chunk (sent before [DONE] when stream_options.include_usage = true)
-          if (parsed.usage) {
-            streamUsage = {
-              promptTokens: parsed.usage.prompt_tokens,
-              completionTokens: parsed.usage.completion_tokens,
-              cacheHitTokens: parsed.usage.prompt_cache_hit_tokens,
-              cacheMissTokens: parsed.usage.prompt_cache_miss_tokens,
-            };
-          }
-          const delta = parsed.choices[0]?.delta;
-          if (!delta) continue;
-
-          if (delta.reasoning_content) {
-            reasoningContent += delta.reasoning_content;
-          }
-          if (delta.content) {
-            yield { type: 'content', chunk: delta.content };
-          }
-          if (delta.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const existing = toolCallsMap.get(tc.index) ?? { id: '', name: '', arguments: '' };
-              toolCallsMap.set(tc.index, {
-                id: tc.id ?? existing.id,
-                name: (existing.name) + (tc.function?.name ?? ''),
-                arguments: existing.arguments + (tc.function?.arguments ?? ''),
-              });
+            // usage-only chunk (sent before [DONE] when stream_options.include_usage = true)
+            if (parsed.usage) {
+              streamUsage = {
+                promptTokens: parsed.usage.prompt_tokens,
+                completionTokens: parsed.usage.completion_tokens,
+                cacheHitTokens: parsed.usage.prompt_cache_hit_tokens,
+                cacheMissTokens: parsed.usage.prompt_cache_miss_tokens,
+              };
             }
+            const delta = parsed.choices[0]?.delta;
+            if (!delta) continue;
+
+            if (delta.reasoning_content) {
+              reasoningContent += delta.reasoning_content;
+            }
+            if (delta.content) {
+              yield { type: 'content', chunk: delta.content };
+            }
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                const existing = toolCallsMap.get(tc.index) ?? { id: '', name: '', arguments: '' };
+                toolCallsMap.set(tc.index, {
+                  id: tc.id ?? existing.id,
+                  name: (existing.name) + (tc.function?.name ?? ''),
+                  arguments: existing.arguments + (tc.function?.arguments ?? ''),
+                });
+              }
+            }
+          } catch {
+            // skip malformed SSE lines
           }
-        } catch {
-          // skip malformed SSE lines
         }
       }
+    } finally {
+      // Always release the reader lock so the connection is closed on timeout or error
+      reader.cancel().catch(() => {});
     }
     // Stream ended without [DONE] — still yield with whatever usage we collected
     yield { type: 'done', reasoningContent: reasoningContent || undefined, usage: streamUsage };
@@ -340,7 +345,9 @@ export class DeepSeekClient {
       }
     }
 
-    return { messages: msgs, finalContent: (msgs[msgs.length - 1]?.content ?? '') as string };
+    // maxRounds exhausted — find the last assistant message to return as finalContent
+    const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant');
+    return { messages: msgs, finalContent: (lastAssistant?.content ?? '') as string };
   }
 
   // Streams responses, executes tool calls, streams final answer in real-time.

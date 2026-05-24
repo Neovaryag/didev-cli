@@ -13,7 +13,7 @@ import type { ProjectContext } from '../../core/context.js';
 import { createSession, saveSession, loadSession, listSessions } from '../../core/session.js';
 import { readProjectFile, writeProjectFile, renderDiff } from '../../core/file-manager.js';
 import { getDiff } from '../../utils/git.js';
-import { initMcp } from '../../core/mcp.js';
+import { initMcp, getMcpManager } from '../../core/mcp.js';
 import type { McpManager } from '../../core/mcp.js';
 import { mergeBundledServers } from '../../core/bundled-mcp.js';
 import { glob } from 'glob';
@@ -431,7 +431,7 @@ export async function runChat(options: ChatOptions = {}): Promise<void> {
   const rootDir = process.cwd();
   const projectCtx = await collectProjectContext(rootDir);
   let model = options.model ?? config.api.model;
-  const contextDoc = await loadContextDocument(rootDir);
+  let contextDoc = await loadContextDocument(rootDir);
 
   let systemPrompt = `You are didev, an expert AI coding assistant integrated with the developer's project.
 You have access to tools to read files, search code, and make changes.
@@ -455,7 +455,9 @@ Guidelines:
   }
 
   const mcpServers = mergeBundledServers(config.mcp?.servers ?? []);
-  const mcp = await initMcp(mcpServers);
+  // Reuse existing singleton if already initialized from menu; connectOne guards against duplicates
+  const existingMgr = getMcpManager();
+  const mcp = existingMgr.hasBeenInitialized ? existingMgr : await initMcp(mcpServers);
   const mcpTools = mcp.tools;
 
   const allTools: Tool[] = [...TOOLS, ...mcpTools];
@@ -513,11 +515,13 @@ Guidelines:
         // ── menu ──
         case 'menu': {
           rl.pause();
+          let menuExiting = false;
           try {
             const { runMenu } = await import('./menu.js');
             const result = await runMenu(true); // inChat = true
 
             if (result.action === 'exit') {
+              menuExiting = true;
               rl.close();
               return;
             }
@@ -548,7 +552,9 @@ Guidelines:
           } catch (e) {
             logger.error(`Menu: ${(e as Error).message}`);
           } finally {
-            rl.resume();
+            // Don't resume if we're closing — rl.resume() on a closed interface is a no-op
+            // but calling it after rl.close() is logically wrong and confusing.
+            if (!menuExiting) rl.resume();
           }
           continue;
         }
@@ -667,16 +673,24 @@ Guidelines:
               const newDoc = await loadContextDocument(rootDir);
               if (newDoc) {
                 const cur = messages[0].content ?? '';
-                messages[0].content = cur.replace(
-                  /\n## Project Knowledge Base\n[\s\S]*?(?=\n\nGuidelines:|\n\nGuidelines:)/,
-                  `\n## Project Knowledge Base\n${newDoc}`
-                );
-                if (!(messages[0].content ?? '').includes('## Project Knowledge Base')) {
-                  messages[0].content = (messages[0].content ?? '').replace(
-                    '\n\nGuidelines:',
-                    `\n\n## Project Knowledge Base\n${newDoc}\n\nGuidelines:`
-                  );
+                const kbMarker = '## Project Knowledge Base\n';
+                const guidelinesMarker = '\n\nGuidelines:';
+                const kbIdx = cur.indexOf(kbMarker);
+                if (kbIdx !== -1) {
+                  // Replace existing knowledge base section up to the next section
+                  const afterKb = cur.indexOf('\n\n', kbIdx + kbMarker.length);
+                  const end = afterKb !== -1 ? afterKb : cur.length;
+                  messages[0].content = cur.slice(0, kbIdx) + kbMarker + newDoc + cur.slice(end);
+                } else {
+                  // Insert before Guidelines section if present, else append
+                  const gIdx = cur.indexOf(guidelinesMarker);
+                  if (gIdx !== -1) {
+                    messages[0].content = cur.slice(0, gIdx) + `\n\n${kbMarker}${newDoc}` + cur.slice(gIdx);
+                  } else {
+                    messages[0].content = cur + `\n\n${kbMarker}${newDoc}`;
+                  }
                 }
+                contextDoc = newDoc; // keep outer ref in sync for post-apply agents
                 logger.success('База знаний перезагружена в текущую сессию');
               }
             } catch (e) {
@@ -779,14 +793,13 @@ Guidelines:
     // ── Regular message → streaming API call ───────────────────────────────
     messages.push({ role: 'user', content: input });
 
-    let currentToolLabel = '';
     const spinner = logger.spinner({ text: chalk.gray('Думаю...'), color: 'cyan' }).start();
 
     rl.pause(); // prevent stray stdin events from closing readline during async work
     try {
       console.log(''); // blank line before response
 
-      const { messages: updatedMsgs, finalContent, usage } = await client.runToolLoopStream(
+      const { messages: updatedMsgs, usage } = await client.runToolLoopStream(
         messages,
         allTools,
         async (name, args) => {
@@ -802,7 +815,6 @@ Guidelines:
           }
         },
         (toolName) => {
-          currentToolLabel = toolName;
           spinner.text = chalk.gray(`Использую: ${toolName}...`);
           if (!spinner.isSpinning) spinner.start();
         },
@@ -818,9 +830,6 @@ Guidelines:
         printTokenUsage(usage, model);
       }
       process.stdout.write('\n');
-
-      // Unused, suppress
-      void currentToolLabel;
 
       // Update messages array in place
       messages.length = 0;
@@ -853,7 +862,6 @@ Guidelines:
         await saveSession(session, rootDir).catch(() => { /* non-critical */ });
       }
 
-      void finalContent; // captured via onChunk above
     } catch (e) {
       const errMsg = (e as Error).message;
       if (spinner.isSpinning) spinner.fail(chalk.red('Ошибка: ' + errMsg));

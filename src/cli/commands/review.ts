@@ -8,8 +8,39 @@ import type { Message, Tool } from '../../core/api.js';
 import { collectProjectContext, contextToSystemPrompt, loadFilesForContext } from '../../core/context.js';
 import { getChangedFiles, getDiff } from '../../utils/git.js';
 import { readProjectFile } from '../../core/file-manager.js';
-import { AGENT_TOOLS } from '../../agents/base-agent.js';
 import type { FileChange } from '../../agents/base-agent.js';
+
+// Only expose tools the review executor actually handles — don't advertise list_files / search_code
+// to the model since they return "Tool not available in review mode", which wastes tokens.
+const REVIEW_TOOLS: Tool[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read contents of a project file',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string', description: 'Relative file path' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Apply a fix to a project file',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Relative file path' },
+          content: { type: 'string', description: 'Complete corrected file content' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+];
 import { writeProjectFile } from '../../core/file-manager.js';
 import { glob } from 'glob';
 import { readFile } from 'fs/promises';
@@ -113,12 +144,12 @@ Be specific and constructive. Reference actual code in your review.`;
 
   const fileChanges: FileChange[] = [];
 
-  const { messages: _, finalContent } = await client.runToolLoop(
+  const { finalContent } = await client.runToolLoop(
     [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `Please review the following code:\n${fileContents}` },
     ],
-    AGENT_TOOLS,
+    REVIEW_TOOLS,
     async (name, args) => {
       if (name === 'write_file') {
         const path = String(args['path']);

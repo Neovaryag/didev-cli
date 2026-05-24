@@ -4,8 +4,8 @@ export function countTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-export function countMessagesTokens(messages: Array<{ content: string }>): number {
-  return messages.reduce((sum, m) => sum + countTokens(m.content) + 4, 0);
+export function countMessagesTokens(messages: Array<{ content: string | null }>): number {
+  return messages.reduce((sum, m) => sum + countTokens(m.content ?? '') + 4, 0);
 }
 
 export function truncateToTokenLimit(text: string, maxTokens: number): string {

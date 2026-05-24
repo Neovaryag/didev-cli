@@ -76,6 +76,9 @@ export class McpManager {
   }
 
   async connectOne(config: McpServerConfig): Promise<void> {
+    // Skip if already connected — prevents duplicate tools when initMcp is called multiple times
+    if (this.clients.has(config.name)) return;
+
     try {
       const env: Record<string, string> = {};
       for (const [k, v] of Object.entries(process.env)) {

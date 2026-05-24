@@ -212,8 +212,12 @@ export async function runScript(
 
   return new Promise((resolve) => {
     const isWindows = process.platform === 'win32';
+    // Only add .cmd suffix on Windows for bare commands (npm, ng, etc.).
+    // mvnw.cmd and gradlew.bat already carry their extension — don't double it.
+    const hasWinExt = /\.(cmd|bat|exe)$/i.test(script.command);
+    const resolvedCmd = isWindows && !hasWinExt ? `${script.command}.cmd` : script.command;
     const child = spawn(
-      isWindows ? `${script.command}.cmd` : script.command,
+      resolvedCmd,
       script.args,
       {
         cwd: script.cwd ?? rootDir,

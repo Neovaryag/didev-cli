@@ -133,8 +133,8 @@ async function collectBmadContext(rootDir: string): Promise<string | null> {
   return parts.length > 0 ? parts.join('\n\n') : null;
 }
 
-export async function generateContextDocument(rootDir: string, apiKey: string, model: string): Promise<string> {
-  const client = initClient({ apiKey, model, maxTokens: 8192, temperature: 0.2 });
+export async function generateContextDocument(rootDir: string, apiKey: string, model: string, baseUrl?: string): Promise<string> {
+  const client = initClient({ apiKey, model, maxTokens: 8192, temperature: 0.2, baseUrl });
   const projectCtx = await collectProjectContext(rootDir);
   const [keyFiles, bmadContext] = await Promise.all([
     collectKeyFiles(rootDir),
@@ -237,7 +237,7 @@ export async function runContextUpdate(options: ContextOptions = {}): Promise<vo
   const spinner = logger.spinner('Анализирую проект и генерирую базу знаний...').start();
 
   try {
-    const doc = await generateContextDocument(rootDir, apiKey, model);
+    const doc = await generateContextDocument(rootDir, apiKey, model, config.api.baseUrl);
     await writeFile(join(didevDir, 'context.md'), doc, 'utf-8');
     spinner.succeed('База знаний проекта создана: .didev/context.md');
     logger.newline();

@@ -143,12 +143,12 @@ export abstract class BaseAgent {
 
   private toolLabel(name: string, args: Record<string, unknown>): string {
     switch (name) {
-      case 'read_file':       return `📖 Читаю:    ${args['path']}`;
-      case 'write_file':      return `✏️  Пишу:     ${args['path']}`;
-      case 'list_directory':  return `📂 Смотрю:   ${args['path'] ?? '.'}`;
-      case 'search_files':    return `🔍 Ищу:      "${args['query']}"`;
-      case 'git_diff':        return `🔀 Git diff`;
-      default:                return `⚙️  ${name}`;
+      case 'read_file':    return `📖 Читаю:    ${args['path']}`;
+      case 'write_file':   return `✏️  Пишу:     ${args['path']}`;
+      case 'list_files':   return `📂 Смотрю:   ${args['pattern'] ?? '.'}`;
+      case 'search_code':  return `🔍 Ищу:      "${args['query']}"`;
+      case 'git_diff':     return `🔀 Git diff`;
+      default:             return `⚙️  ${name}`;
     }
   }
 
