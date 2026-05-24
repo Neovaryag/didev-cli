@@ -208,7 +208,13 @@ export abstract class BaseAgent {
           return this.executeToolCall(name, args, rootDir, fileChanges, dryRun ? pendingWrites : undefined);
         },
         model,
-        { temperature: 0.3 },
+        {
+          temperature: 0.3,
+          onRetry: (attempt, total, _err) => {
+            spinner.text = chalk.yellow(`⟳ Таймаут — повторяю попытку ${attempt}/${total}...`);
+            if (!spinner.isSpinning) spinner.start();
+          },
+        },
         options.maxRounds ?? 10
       );
 
@@ -244,7 +250,12 @@ export abstract class BaseAgent {
         chalk.dim(`  завершён за ${elapsed}s`)
       );
     } catch (e) {
-      spinner.fail(chalk.red(`${this.name} завершился с ошибкой: ${(e as Error).message}`));
+      const msg = (e as Error).message;
+      const isTimeout = /timed out|timeout/i.test(msg);
+      const display = isTimeout
+        ? `${this.name}: превышено время ожидания ответа от DeepSeek (все попытки исчерпаны)`
+        : `${this.name}: ${msg}`;
+      spinner.fail(chalk.red(display));
       throw e;
     }
 

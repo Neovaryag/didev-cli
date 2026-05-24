@@ -23,9 +23,11 @@ export interface RetryOptions {
   initialDelay?: number;
   maxDelay?: number;
   label?: string;
+  /** Called before each retry with (attemptNumber, totalAttempts, error, delayMs) */
+  onRetry?: (attempt: number, total: number, error: Error, delayMs: number) => void;
 }
 
-const RETRIABLE = /timeout|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|network|50[234]|429/i;
+const RETRIABLE = /timeout|timed out|ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|network|50[234]|429/i;
 
 /**
  * Retry fn with exponential backoff + jitter on transient errors.
@@ -35,7 +37,7 @@ export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   options: RetryOptions = {}
 ): Promise<T> {
-  const { maxAttempts = 3, initialDelay = 500, maxDelay = 10_000, label = 'Operation' } = options;
+  const { maxAttempts = 3, initialDelay = 1_000, maxDelay = 15_000, label = 'Operation', onRetry } = options;
   let lastError!: Error;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -45,8 +47,9 @@ export async function retryWithBackoff<T>(
       lastError = e as Error;
       const isRetriable = RETRIABLE.test(lastError.message);
       if (!isRetriable || attempt === maxAttempts - 1) throw lastError;
-      const jitter = Math.random() * 200;
+      const jitter = Math.random() * 500;
       const delay = Math.min(initialDelay * Math.pow(2, attempt) + jitter, maxDelay);
+      onRetry?.(attempt + 1, maxAttempts, lastError, Math.round(delay));
       logger.debug(`${label}: attempt ${attempt + 1} failed ("${lastError.message}"), retrying in ${Math.round(delay)}ms…`);
       await new Promise(r => setTimeout(r, delay));
     }

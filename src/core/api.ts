@@ -34,6 +34,10 @@ export interface ChatOptions {
   stream?: boolean;
   tools?: Tool[];
   toolChoice?: 'auto' | 'none' | { type: 'function'; function: { name: string } };
+  /** Override per-call timeout in ms (default: 150_000) */
+  timeoutMs?: number;
+  /** Called before each retry: (attemptNumber, totalAttempts, error) */
+  onRetry?: (attempt: number, total: number, error: Error) => void;
 }
 
 export interface DeepSeekConfig {
@@ -107,6 +111,7 @@ export class DeepSeekClient {
 
     logger.debug(`POST ${this.baseUrl}/chat/completions model=${resolvedModel} msgs=${messages.length}`);
 
+    const timeoutMs = options.timeoutMs ?? 150_000;
     const res = await retryWithBackoff(
       () => withTimeout(
         fetch(`${this.baseUrl}/chat/completions`, {
@@ -114,10 +119,16 @@ export class DeepSeekClient {
           headers: this.headers,
           body: JSON.stringify(body),
         }),
-        30_000,
+        timeoutMs,
         'DeepSeek chat'
       ),
-      { maxAttempts: 3, label: 'DeepSeek chat' }
+      {
+        maxAttempts: 5,
+        label: 'DeepSeek chat',
+        onRetry: options.onRetry
+          ? (attempt, total, err, _delay) => options.onRetry!(attempt, total, err)
+          : undefined,
+      }
     );
 
     if (!res.ok) {
@@ -274,7 +285,7 @@ export class DeepSeekClient {
     let round = 0;
 
     while (round < maxRounds) {
-      const response = await this.chat(msgs, model, { ...options, tools });
+      const response = await this.chat(msgs, model, { ...options, tools, onRetry: options.onRetry });
       round++;
 
       msgs.push({
