@@ -286,9 +286,58 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     }
   }
 
-  // ── Preview & confirm file writes ────────────────────────────────────────
+  // ── Preview & confirm file writes (with feedback re-run loop) ───────────
   if (confirmWrites && allPendingWrites.size > 0) {
-    await confirmAndApplyWrites(allPendingWrites, rootDir, allFileChanges);
+    const MAX_FEEDBACK_ROUNDS = 3;
+    let feedbackRound = 0;
+
+    while (allPendingWrites.size > 0 && feedbackRound <= MAX_FEEDBACK_ROUNDS) {
+      const { applied, feedback } = await confirmAndApplyWrites(allPendingWrites, rootDir, allFileChanges);
+
+      if (applied || !feedback) break;
+
+      feedbackRound++;
+      if (feedbackRound > MAX_FEEDBACK_ROUNDS) {
+        logger.warn('Достигнут лимит правок (3 итерации). Изменения пропущены.');
+        break;
+      }
+
+      // Re-run developer agents with user feedback appended to task
+      const revisedTask = `${options.task}\n\n---\nПользователь отклонил предыдущий вариант.\nПравки: ${feedback}`;
+
+      const devAgents = pipelineAgents(filteredPipeline).filter(a =>
+        ['Developer', 'Frontend Developer', 'Backend Developer'].includes(a.name)
+      );
+
+      if (devAgents.length === 0) {
+        logger.warn('Developer-агент не найден в пайплайне — не могу применить правки.');
+        break;
+      }
+
+      logger.newline();
+      console.log(chalk.cyan(`  ↺  Передаю правки Developer-агенту (итерация ${feedbackRound}/${MAX_FEEDBACK_ROUNDS})...`));
+      logger.newline();
+
+      allPendingWrites.clear();
+
+      for (const agent of devAgents) {
+        try {
+          const result = await agent.run({
+            ...agentOptions,
+            task: revisedTask,
+            previousResults: agentResults,
+          });
+          for (const [path, entry] of result.pendingWrites) {
+            allPendingWrites.set(path, entry);
+          }
+          const idx = agentResults.findIndex(r => r.agentName === agent.name);
+          if (idx >= 0) agentResults[idx] = result;
+          else agentResults.push(result);
+        } catch (e) {
+          logger.error(`Ошибка повторного запуска ${agent.name}: ${(e as Error).message}`);
+        }
+      }
+    }
   }
 
   // ── Post-apply: build / lint / typecheck ──────────────────────────────────
@@ -322,7 +371,7 @@ async function confirmAndApplyWrites(
   pendingWrites: Map<string, { content: string; description?: string }>,
   rootDir: string,
   allFileChanges: Map<string, 'created' | 'modified'>
-): Promise<void> {
+): Promise<{ applied: boolean; feedback?: string }> {
   logger.newline();
 
   const lines: string[] = [
@@ -352,7 +401,7 @@ async function confirmAndApplyWrites(
       allFileChanges.set(path, existed ? 'modified' : 'created');
       logger.success(`Записан: ${path}`);
     }
-    return;
+    return { applied: true };
   }
 
   // Show diff then action choice
@@ -373,26 +422,15 @@ async function confirmAndApplyWrites(
     logger.newline();
   }
 
-  const { action } = await inquirer.prompt<{ action: 'apply' | 'apply-all' | 'skip' }>([{
+  const { action } = await inquirer.prompt<{ action: 'apply' | 'apply-all' | 'feedback' | 'skip' }>([{
     type: 'list',
     name: 'action',
     message: `Применить ${pendingWrites.size} файл(ов)?`,
     choices: [
-      {
-        name: `${chalk.green('✔')}  Принять`,
-        value: 'apply',
-        short: 'Принято',
-      },
-      {
-        name: `${chalk.cyan('⚡')}  Принять для всех запросов в этой сессии`,
-        value: 'apply-all',
-        short: 'Автоприменение включено',
-      },
-      {
-        name: `${chalk.red('✕')}  Отклонить`,
-        value: 'skip',
-        short: 'Отклонено',
-      },
+      { name: `${chalk.green('✔')}  Принять`,                                         value: 'apply',     short: 'Принято' },
+      { name: `${chalk.cyan('⚡')}  Принять для всех запросов в этой сессии`,          value: 'apply-all', short: 'Автоприменение включено' },
+      { name: `${chalk.yellow('✏')}  Дать правки — агент переделает`,                  value: 'feedback',  short: 'Правки' },
+      { name: `${chalk.red('✕')}  Отклонить — пропустить`,                            value: 'skip',      short: 'Отклонено' },
     ],
     default: 'apply',
   }]);
@@ -403,6 +441,18 @@ async function confirmAndApplyWrites(
     logger.newline();
   }
 
+  if (action === 'feedback') {
+    logger.newline();
+    const { correction } = await inquirer.prompt<{ correction: string }>([{
+      type: 'input',
+      name: 'correction',
+      message: chalk.yellow('Что нужно исправить или изменить?'),
+      validate: (v: string) => v.trim().length > 0 || 'Введите пожелания для агента',
+    }]);
+    logger.newline();
+    return { applied: false, feedback: correction.trim() };
+  }
+
   if (action === 'apply' || action === 'apply-all') {
     for (const [path, { content }] of pendingWrites) {
       const existed = await readProjectFile(path, rootDir).then(() => true).catch(() => false);
@@ -410,9 +460,11 @@ async function confirmAndApplyWrites(
       allFileChanges.set(path, existed ? 'modified' : 'created');
       logger.success(`Записан: ${path}`);
     }
-  } else {
-    logger.info('Изменения отклонены — файлы не тронуты');
+    return { applied: true };
   }
+
+  logger.info('Изменения отклонены — файлы не тронуты');
+  return { applied: false };
 }
 
 function buildSummary(
