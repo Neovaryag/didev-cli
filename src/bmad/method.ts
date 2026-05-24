@@ -9,12 +9,20 @@ import { initClient } from '../core/api.js';
 import type { Message } from '../core/api.js';
 import { collectProjectContext, contextToSystemPrompt } from '../core/context.js';
 
+interface BmadIndex {
+  project: string;
+  epics: string[];
+  currentStory: string | null;
+  createdAt: string;
+}
+
 interface Epic {
   id: string;
   title: string;
   description: string;
   status: 'active' | 'done' | 'archived';
   stories: string[];
+  aiBreakdown?: string;
   createdAt: string;
 }
 
@@ -28,6 +36,7 @@ interface Story {
   acceptanceCriteria: string[];
   tasks: string[];
   status: 'backlog' | 'in-progress' | 'review' | 'done';
+  aiDetails?: string;
   branch?: string;
   createdAt: string;
 }
@@ -122,6 +131,16 @@ Format as YAML.`,
   await mkdir(join(bmadDir(rootDir), 'epics'), { recursive: true });
   await writeYaml(epicPath, { ...epic, aiBreakdown: response.content });
 
+  // Update index.yaml
+  const indexPath = join(bmadDir(rootDir), 'index.yaml');
+  const index = await readYaml<BmadIndex>(indexPath) ?? {
+    project: '', epics: [], currentStory: null, createdAt: new Date().toISOString(),
+  };
+  if (!index.epics.includes(epicId)) {
+    index.epics.push(epicId);
+    await writeYaml(indexPath, index);
+  }
+
   logger.success(`Epic created: ${epicId}`);
   logger.newline();
   console.log(response.content);
@@ -204,11 +223,27 @@ Generate:
     createdAt: new Date().toISOString(),
   };
 
+  const storyPath = join(bmadDir(rootDir), 'stories', `${storyId}.yaml`);
   await mkdir(join(bmadDir(rootDir), 'stories'), { recursive: true });
-  await writeYaml(join(bmadDir(rootDir), 'stories', `${storyId}.yaml`), {
-    ...story,
-    aiDetails: response.content,
-  });
+  await writeYaml(storyPath, { ...story, aiDetails: response.content });
+
+  // Add story to parent epic
+  const epicPath = join(bmadDir(rootDir), 'epics', `${epicId}.yaml`);
+  const parentEpic = await readYaml<Epic>(epicPath);
+  if (parentEpic) {
+    if (!parentEpic.stories.includes(storyId)) {
+      parentEpic.stories.push(storyId);
+      await writeYaml(epicPath, parentEpic);
+    }
+  }
+
+  // Update index currentStory
+  const indexPath = join(bmadDir(rootDir), 'index.yaml');
+  const index = await readYaml<BmadIndex>(indexPath);
+  if (index) {
+    index.currentStory = storyId;
+    await writeYaml(indexPath, index);
+  }
 
   logger.success(`Story created: ${storyId}`);
   logger.newline();
@@ -222,18 +257,22 @@ export async function runBmadImplement(
   rootDir = process.cwd()
 ): Promise<void> {
   let story: Story | null = null;
+  let storyFilePath = '';
 
   if (storyId) {
-    story = await readYaml<Story>(join(bmadDir(rootDir), 'stories', `${storyId}.yaml`));
+    storyFilePath = join(bmadDir(rootDir), 'stories', `${storyId}.yaml`);
+    story = await readYaml<Story>(storyFilePath);
   } else {
-    // Find first in-progress or backlog story
+    // Find first backlog or in-progress story
     const storiesDir = join(bmadDir(rootDir), 'stories');
     try {
       const files = await readdir(storiesDir);
       for (const f of files) {
-        const s = await readYaml<Story>(join(storiesDir, f));
-        if (s && (s.status === 'in-progress' || s.status === 'backlog')) {
+        const filePath = join(storiesDir, f);
+        const s = await readYaml<Story>(filePath);
+        if (s && (s.status === 'backlog' || s.status === 'in-progress')) {
           story = s;
+          storyFilePath = filePath;
           break;
         }
       }
@@ -247,17 +286,23 @@ export async function runBmadImplement(
 
   logger.info(`Implementing: ${story.id} — ${story.title}`);
 
-  const { runOrchestration } = await import('../agents/orchestrator.js');
-  await runOrchestration({
-    task: `[BMad Story ${story.id}] ${story.title}
-As a ${story.asA}, I want ${story.iWant}, so that ${story.soThat}.`,
-    mode: 'full',
-    rootDir,
-  });
-
-  // Mark story as in-progress
+  // Mark as in-progress before starting
   story.status = 'in-progress';
-  await writeYaml(join(bmadDir(rootDir), 'stories', `${story.id}.yaml`), story);
+  await writeYaml(storyFilePath, story);
+
+  const task = [
+    `[BMad Story ${story.id}] ${story.title}`,
+    `As a ${story.asA}, I want ${story.iWant}, so that ${story.soThat}.`,
+    story.aiDetails ? `\n## Story Details (AI Analysis)\n${story.aiDetails}` : '',
+  ].filter(Boolean).join('\n');
+
+  const { runOrchestration } = await import('../agents/orchestrator.js');
+  await runOrchestration({ task, mode: 'full', rootDir });
+
+  // Mark as done after successful implementation
+  story.status = 'done';
+  await writeYaml(storyFilePath, story);
+  logger.success(`Story ${story.id} marked as done`);
 }
 
 export async function runBmadReview(rootDir = process.cwd()): Promise<void> {

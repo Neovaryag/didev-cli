@@ -44,6 +44,25 @@ export interface OrchestrationResult {
   summary: string;
 }
 
+// Detect intent from task text and pick the leanest pipeline that can handle it.
+// User can always override with --mode.
+function inferMode(task: string): OrchestrationMode | null {
+  const t = task.toLowerCase();
+  // Pure fix/debug/test tasks need only the Developer — no analysis or architecture phase
+  const devOnly = [
+    'исправь', 'исправить', 'починить', 'починь', 'fix', 'debug', 'debugg',
+    'тест', 'test', 'tests', 'баг', 'bug', 'ошибк', 'error', 'упал', 'failed',
+    'broken', 'сломан', 'не работает', 'not working',
+  ];
+  if (devOnly.some(kw => t.includes(kw))) return 'developer-only';
+
+  // Refactor / review tasks: light pipeline (analyst + dev + reviewer)
+  const light = ['рефакторинг', 'refactor', 'review', 'code review', 'ревью', 'оптимизируй', 'optimize'];
+  if (light.some(kw => t.includes(kw))) return 'light';
+
+  return null; // let config/default decide
+}
+
 function buildPipeline(
   family: AgentFamily,
   projectCtx: ProjectContext,
@@ -78,7 +97,7 @@ function buildPipeline(
       new FrontendAnalystAgent(),
       new FrontendArchitectAgent(),
       new FrontendDeveloperAgent(),
-      [new ReviewerAgent(), new TesterAgent()],
+      [new ReviewerAgent(), new TesterAgent(), new PerformanceAuditorAgent()],
     ];
   }
 
@@ -87,7 +106,7 @@ function buildPipeline(
       new BackendAnalystAgent(),
       new BackendArchitectAgent(),
       new BackendDeveloperAgent(),
-      [new SecurityAuditorAgent(), new ReviewerAgent(), new TesterAgent()],
+      [new SecurityAuditorAgent(), new ReviewerAgent(), new TesterAgent(), new PerformanceAuditorAgent()],
     ];
   }
 
@@ -96,7 +115,7 @@ function buildPipeline(
     new AnalystAgent(),
     new ArchitectAgent(),
     new DeveloperAgent(),
-    [new ReviewerAgent(), new TesterAgent()],
+    [new SecurityAuditorAgent(), new ReviewerAgent(), new TesterAgent(), new PerformanceAuditorAgent()],
   ];
 }
 
@@ -165,7 +184,11 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     logger.success(`MCP: ${mcp.tools.length} tool(s) available to agents`);
   }
 
-  const mode = options.mode ?? (config.agents.family as OrchestrationMode) ?? 'full';
+  // config.agents.family is 'full' | 'light' | 'custom' — only 'full' and 'light' map to OrchestrationMode
+  const configMode: OrchestrationMode | null =
+    config.agents.family === 'full' ? 'full' :
+    config.agents.family === 'light' ? 'light' : null;
+  const mode: OrchestrationMode = options.mode ?? inferMode(options.task) ?? configMode ?? 'full';
   const family = options.family ?? 'auto';
 
   const pipeline = buildPipeline(family, projectCtx, mode as OrchestrationMode);
@@ -194,9 +217,13 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
   // confirmWrites defaults to true — always ask before touching the filesystem
   const confirmWrites = options.confirmWrites !== false;
 
+  // Resolve the fast model (optional, falls back to main model if not configured)
+  const fastModel: string = config.api.fastModel ?? model;
+
   const agentOptions: Omit<AgentOptions, 'previousResults'> = {
     client,
     model,
+    fastModel,
     projectContext: projectCtx,
     rootDir,
     task: options.task,
@@ -238,6 +265,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
       const settled = await Promise.allSettled(
         step.map(agent => agent.run({
           ...agentOptions,
+          model: agent.preferFastModel ? fastModel : model,
           previousResults: snapshot,
           stepInfo: { current: stepNum, total: totalSteps, parallel: true },
         }))
@@ -263,6 +291,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
       try {
         const result = await step.run({
           ...agentOptions,
+          model: step.preferFastModel ? fastModel : model,
           previousResults: snapshot,
           stepInfo: { current: stepNum, total: totalSteps },
         });
@@ -302,7 +331,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
         break;
       }
 
-      // Re-run developer agents with user feedback appended to task
+      // Re-run developer agents (and optionally architect) with user feedback
       const revisedTask = `${options.task}\n\n---\nПользователь отклонил предыдущий вариант.\nПравки: ${feedback}`;
 
       const devAgents = pipelineAgents(filteredPipeline).filter(a =>
@@ -314,16 +343,46 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
         break;
       }
 
+      const isArchitecturalFeedback = /архитектур|структур|паттерн|слой|design|architect|structure|pattern|approach|подход|переделай|refactor/i.test(feedback);
+      const archAgents = isArchitecturalFeedback
+        ? pipelineAgents(filteredPipeline).filter(a =>
+            ['Architect', 'Frontend Architect', 'Backend Architect'].includes(a.name)
+          )
+        : [];
+
       logger.newline();
-      console.log(chalk.cyan(`  ↺  Передаю правки Developer-агенту (итерация ${feedbackRound}/${MAX_FEEDBACK_ROUNDS})...`));
+      if (archAgents.length > 0) {
+        console.log(chalk.cyan(`  ↺  Архитектурные правки — перезапускаю Architect + Developer (итерация ${feedbackRound}/${MAX_FEEDBACK_ROUNDS})...`));
+      } else {
+        console.log(chalk.cyan(`  ↺  Передаю правки Developer-агенту (итерация ${feedbackRound}/${MAX_FEEDBACK_ROUNDS})...`));
+      }
       logger.newline();
 
       allPendingWrites.clear();
 
+      // Re-run architect first if needed
+      for (const agent of archAgents) {
+        try {
+          const result = await agent.run({
+            ...agentOptions,
+            model: agent.preferFastModel ? fastModel : model,
+            task: revisedTask,
+            previousResults: agentResults,
+          });
+          const idx = agentResults.findIndex(r => r.agentName === agent.name);
+          if (idx >= 0) agentResults[idx] = result;
+          else agentResults.push(result);
+        } catch (e) {
+          logger.error(`Ошибка повторного запуска ${agent.name}: ${(e as Error).message}`);
+        }
+      }
+
+      // Re-run developers
       for (const agent of devAgents) {
         try {
           const result = await agent.run({
             ...agentOptions,
+            model: agent.preferFastModel ? fastModel : model,
             task: revisedTask,
             previousResults: agentResults,
           });
@@ -525,7 +584,10 @@ function displayFinalSummary(
 
   // Successful agents
   for (const r of results) {
-    lines.push(`  ${chalk.green('✓')}  ${r.emoji ?? ''} ${chalk.bold(r.agentName)}  ${chalk.dim((r.duration / 1000).toFixed(1) + 's')}`);
+    const tokenStr = r.tokenUsage
+      ? chalk.dim(`  ${((r.tokenUsage.promptTokens + r.tokenUsage.completionTokens) / 1000).toFixed(1)}k tok`)
+      : '';
+    lines.push(`  ${chalk.green('✓')}  ${r.emoji ?? ''} ${chalk.bold(r.agentName)}  ${chalk.dim((r.duration / 1000).toFixed(1) + 's')}${tokenStr}`);
   }
 
   // Failed agents
