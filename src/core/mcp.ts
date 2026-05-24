@@ -47,6 +47,11 @@ export class McpManager {
     return this.clients.size > 0;
   }
 
+  /** True if connectAll has been called at least once (even if all failed) */
+  get hasBeenInitialized(): boolean {
+    return this.serverStatuses.size > 0;
+  }
+
   // Connect to all enabled servers. Non-fatal: logs warnings on failure.
   async connectAll(servers: McpServerConfig[]): Promise<void> {
     // Track disabled servers immediately

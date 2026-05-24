@@ -3,7 +3,7 @@ import inquirer from 'inquirer';
 import { createRequire } from 'module';
 import { loadConfig, setConfigValue } from '../../core/config.js';
 import type { McpServerConfig } from '../../core/config.js';
-import { getMcpManager } from '../../core/mcp.js';
+import { getMcpManager, initMcp } from '../../core/mcp.js';
 import type { McpConnectionStatus } from '../../core/mcp.js';
 import { BUNDLED_SERVERS, getMissingRequiredEnv, mergeBundledServers } from '../../core/bundled-mcp.js';
 import { logger } from '../../utils/logger.js';
@@ -61,12 +61,29 @@ function header(projectName: string): void {
 export async function runMenu(inChat = false): Promise<MenuResult> {
   const projectName = process.cwd().split(/[/\\]/).pop() ?? 'project';
 
+  // If MCP was not initialized yet (e.g. bare `didev` or `didev menu`),
+  // connect servers now so the status display is accurate.
+  const manager = getMcpManager();
+  if (!manager.hasBeenInitialized) {
+    const config = await loadConfig();
+    const servers = mergeBundledServers(config.mcp?.servers ?? []);
+    if (servers.some(s => s.enabled !== false)) {
+      logger.dim('  Подключаю MCP серверы...');
+      await initMcp(servers);
+    }
+  }
+
   while (true) {
     const config = await loadConfig();
     const currentModel = config.api.model;
     const servers = config.mcp?.servers ?? [];
-    const mcpLabel = servers.length > 0
-      ? chalk.dim(`(${servers.length})`)
+
+    // Show connected count from live manager, fall back to config count
+    const statuses = manager.getServerStatuses();
+    const connectedCount = statuses.filter(s => s.status === 'connected').length;
+    const totalCount = mergeBundledServers(servers).length;
+    const mcpLabel = totalCount > 0
+      ? chalk.dim(`(${connectedCount}/${totalCount} подключено)`)
       : chalk.dim('(нет)');
 
     header(projectName);
