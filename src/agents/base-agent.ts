@@ -1,4 +1,6 @@
 import chalk from 'chalk';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { DeepSeekClient, initClient } from '../core/api.js';
 import type { Message, Tool, ToolCall } from '../core/api.js';
 import { readProjectFile, writeProjectFile, listDirectory } from '../core/file-manager.js';
@@ -10,6 +12,8 @@ import { getChangedFiles, getDiff } from '../utils/git.js';
 import { glob } from 'glob';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+
+const execAsync = promisify(exec);
 
 export interface AgentResult {
   agentName: string;
@@ -130,6 +134,20 @@ export const AGENT_TOOLS: Tool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Run a shell command in the project directory (e.g. npm run build, mvn compile, tsc --noEmit). Use this to verify builds or run tests — never write scripts to /tmp.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Shell command to execute' },
+        },
+        required: ['command'],
+      },
+    },
+  },
 ];
 
 export abstract class BaseAgent {
@@ -148,6 +166,7 @@ export abstract class BaseAgent {
       case 'list_files':   return `📂 Смотрю:   ${args['pattern'] ?? '.'}`;
       case 'search_code':  return `🔍 Ищу:      "${args['query']}"`;
       case 'git_diff':     return `🔀 Git diff`;
+      case 'run_command':  return `▶  Запускаю: ${args['command']}`;
       default:             return `⚙️  ${name}`;
     }
   }
@@ -373,6 +392,19 @@ export abstract class BaseAgent {
           return diff.slice(0, 400_000) || 'No changes';
         } catch (e) {
           return `Git not available or no changes: ${(e as Error).message}`;
+        }
+      }
+
+      case 'run_command': {
+        const cmd = String(args['command']);
+        try {
+          const { stdout, stderr } = await execAsync(cmd, { cwd: rootDir, timeout: 60_000 });
+          const out = [stdout, stderr].filter(Boolean).join('\n').trim();
+          return out.slice(0, 40_000) || '(no output)';
+        } catch (e) {
+          const err = e as { stdout?: string; stderr?: string; message: string };
+          const out = [err.stdout, err.stderr, err.message].filter(Boolean).join('\n').trim();
+          return out.slice(0, 40_000) || 'Command failed';
         }
       }
 

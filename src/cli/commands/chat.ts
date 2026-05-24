@@ -1,4 +1,6 @@
 import * as readline from 'readline';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import chalk from 'chalk';
 import boxen from 'boxen';
 import { createRequire } from 'module';
@@ -20,6 +22,8 @@ import { glob } from 'glob';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import inquirer from 'inquirer';
+
+const execAsync = promisify(exec);
 
 export interface ChatOptions {
   model?: string;
@@ -96,6 +100,20 @@ const TOOLS: Tool[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'run_command',
+      description: 'Run a shell command in the project directory (e.g. npm run build, npm test, tsc --noEmit). Never write scripts to /tmp — use this tool directly.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Shell command to execute' },
+        },
+        required: ['command'],
+      },
+    },
+  },
 ];
 
 async function executeToolCall(
@@ -164,6 +182,18 @@ async function executeToolCall(
         return diff.slice(0, 400_000) || 'No changes';
       } catch (e) {
         return `Error: ${(e as Error).message}`;
+      }
+    }
+    case 'run_command': {
+      const cmd = String(args['command']);
+      try {
+        const { stdout, stderr } = await execAsync(cmd, { cwd: rootDir, timeout: 60_000 });
+        const out = [stdout, stderr].filter(Boolean).join('\n').trim();
+        return out.slice(0, 40_000) || '(no output)';
+      } catch (e) {
+        const err = e as { stdout?: string; stderr?: string; message: string };
+        const out = [err.stdout, err.stderr, err.message].filter(Boolean).join('\n').trim();
+        return out.slice(0, 40_000) || 'Command failed';
       }
     }
     default:
@@ -442,6 +472,7 @@ ${contextDoc ? `\n## Project Knowledge Base\n${contextDoc}` : ''}
 Guidelines:
 - Be concise and practical
 - When making file changes, use the write_file tool
+- To run build/test/lint commands, use run_command directly — never write scripts to /tmp
 - Always show what you're changing and why
 - Use the project's existing patterns and conventions`;
 
