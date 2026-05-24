@@ -94,10 +94,17 @@ export class McpManager {
         { capabilities: {} }
       );
 
-      await withTimeout(client.connect(transport), 10_000, `MCP connect "${config.name}"`);
+      // npx servers may need to download the package on first run — give them 90s
+      const isNpx = config.command === 'npx' || config.command === 'npx.cmd';
+      const connectTimeout = isNpx ? 90_000 : 20_000;
+      if (isNpx) {
+        logger.dim(`  ⬇  "${config.name}" — downloading via npx, may take up to 90s on first run...`);
+      }
+
+      await withTimeout(client.connect(transport), connectTimeout, `MCP connect "${config.name}"`);
       this.clients.set(config.name, client);
 
-      const { tools } = await withTimeout(client.listTools(), 10_000, `MCP listTools "${config.name}"`);
+      const { tools } = await withTimeout(client.listTools(), 15_000, `MCP listTools "${config.name}"`);
 
       for (const tool of tools) {
         const qualifiedName = `${config.name}__${tool.name}`;
