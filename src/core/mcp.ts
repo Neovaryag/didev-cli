@@ -53,20 +53,18 @@ export class McpManager {
   }
 
   // Connect to all enabled servers. Non-fatal: logs warnings on failure.
+  // Idempotent: already-connected servers are skipped to prevent duplicate tool registration.
   async connectAll(servers: McpServerConfig[]): Promise<void> {
-    // Track disabled servers immediately
     for (const s of servers) {
-      if (s.enabled === false) {
+      if (s.enabled === false && !this.serverStatuses.has(s.name)) {
         this.serverStatuses.set(s.name, { name: s.name, status: 'disabled', toolCount: 0 });
       }
     }
 
-    const enabled = servers.filter(s => s.enabled !== false);
-    if (enabled.length === 0) return;
+    const toConnect = servers.filter(s => s.enabled !== false && !this.clients.has(s.name));
+    if (toConnect.length === 0) return;
 
-    await Promise.allSettled(
-      enabled.map(s => this.connectOne(s))
-    );
+    await Promise.allSettled(toConnect.map(s => this.connectOne(s)));
   }
 
   getServerStatuses(): McpServerStatus[] {
