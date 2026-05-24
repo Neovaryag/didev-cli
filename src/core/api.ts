@@ -167,13 +167,15 @@ export class DeepSeekClient {
     model?: string,
     options: ChatOptions = {}
   ): AsyncGenerator<
-    { type: 'content'; chunk: string } | { type: 'done'; reasoningContent?: string; toolCalls?: ToolCall[] },
+    | { type: 'content'; chunk: string }
+    | { type: 'done'; reasoningContent?: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } },
     void,
     unknown
   > {
     const resolvedModel = model ?? this.defaultModel;
     const body = this.buildBody(resolvedModel, messages, options, {
       stream: true,
+      stream_options: { include_usage: true },
       ...(options.tools ? { tools: options.tools, tool_choice: options.toolChoice ?? 'auto' } : {}),
     });
 
@@ -204,6 +206,7 @@ export class DeepSeekClient {
     const decoder = new TextDecoder();
     let buffer = '';
     let reasoningContent = '';
+    let streamUsage: { promptTokens: number; completionTokens: number } | undefined;
     const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
 
     while (true) {
@@ -228,7 +231,7 @@ export class DeepSeekClient {
                   function: { name: tc.name, arguments: tc.arguments },
                 }))
             : undefined;
-          yield { type: 'done', reasoningContent: reasoningContent || undefined, toolCalls };
+          yield { type: 'done', reasoningContent: reasoningContent || undefined, toolCalls, usage: streamUsage };
           return;
         }
         try {
@@ -244,7 +247,12 @@ export class DeepSeekClient {
                 }>;
               };
             }>;
+            usage?: { prompt_tokens: number; completion_tokens: number };
           };
+          // usage-only chunk (sent by DeepSeek when stream_options.include_usage = true)
+          if (parsed.usage) {
+            streamUsage = { promptTokens: parsed.usage.prompt_tokens, completionTokens: parsed.usage.completion_tokens };
+          }
           const delta = parsed.choices[0]?.delta;
           if (!delta) continue;
 
@@ -326,9 +334,10 @@ export class DeepSeekClient {
     model?: string,
     options: ChatOptions = {},
     maxRounds = 10
-  ): Promise<{ messages: Message[]; finalContent: string }> {
+  ): Promise<{ messages: Message[]; finalContent: string; usage?: { promptTokens: number; completionTokens: number } }> {
     const msgs = [...messages];
     let round = 0;
+    let lastUsage: { promptTokens: number; completionTokens: number } | undefined;
 
     while (round < maxRounds) {
       round++;
@@ -344,12 +353,13 @@ export class DeepSeekClient {
         } else {
           reasoningContent = event.reasoningContent;
           toolCalls = event.toolCalls;
+          lastUsage = event.usage;
         }
       }
 
       if (!toolCalls || toolCalls.length === 0) {
         msgs.push({ role: 'assistant', content: finalContent, reasoning_content: reasoningContent });
-        return { messages: msgs, finalContent };
+        return { messages: msgs, finalContent, usage: lastUsage };
       }
 
       // Has tool calls — reasoning_content MUST be passed back per spec
@@ -374,7 +384,7 @@ export class DeepSeekClient {
       }
     }
 
-    return { messages: msgs, finalContent: (msgs[msgs.length - 1]?.content ?? '') as string };
+    return { messages: msgs, finalContent: (msgs[msgs.length - 1]?.content ?? '') as string, usage: lastUsage };
   }
 
   private serializeMessage(msg: Message): Record<string, unknown> {

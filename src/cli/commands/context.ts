@@ -6,6 +6,7 @@ import { loadConfig, getApiKey } from '../../core/config.js';
 import { initClient } from '../../core/api.js';
 import { collectProjectContext } from '../../core/context.js';
 import { glob } from 'glob';
+import yaml from 'js-yaml';
 
 async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
@@ -69,14 +70,88 @@ async function collectKeyFiles(rootDir: string): Promise<{ path: string; content
   return result;
 }
 
+async function collectBmadContext(rootDir: string): Promise<string | null> {
+  const bmadDir = join(rootDir, '.didev', 'bmad');
+  if (!(await exists(bmadDir))) return null;
+
+  const parts: string[] = [];
+
+  // index.yaml — current story pointer
+  try {
+    const indexRaw = await readFile(join(bmadDir, 'index.yaml'), 'utf-8');
+    const index = yaml.load(indexRaw) as Record<string, unknown>;
+    if (index?.currentStory) {
+      parts.push(`**Current Story:** ${index.currentStory}`);
+    }
+  } catch { /* no index yet */ }
+
+  // Active epics
+  const epicFiles = await glob('epics/*.yaml', { cwd: bmadDir }).catch(() => []);
+  const activeEpics: string[] = [];
+  for (const f of epicFiles) {
+    try {
+      const raw = await readFile(join(bmadDir, f), 'utf-8');
+      const epic = yaml.load(raw) as Record<string, unknown>;
+      if (epic?.status !== 'archived') {
+        activeEpics.push(`- **${epic?.id}**: ${epic?.title} (${epic?.status})`);
+      }
+    } catch { /* skip */ }
+  }
+  if (activeEpics.length > 0) {
+    parts.push(`**Active Epics:**\n${activeEpics.join('\n')}`);
+  }
+
+  // Stories (in-progress + backlog, max 10)
+  const storyFiles = await glob('stories/*.yaml', { cwd: bmadDir }).catch(() => []);
+  const relevantStories: string[] = [];
+  for (const f of storyFiles.slice(0, 20)) {
+    try {
+      const raw = await readFile(join(bmadDir, f), 'utf-8');
+      const story = yaml.load(raw) as Record<string, unknown>;
+      if (story?.status === 'done') continue;
+      const criteria = Array.isArray(story?.acceptanceCriteria)
+        ? (story.acceptanceCriteria as string[]).slice(0, 3).map((c: string) => `  - ${c}`).join('\n')
+        : '';
+      relevantStories.push(
+        `- **${story?.id}** [${story?.status}]: ${story?.title}\n${criteria}`
+      );
+    } catch { /* skip */ }
+  }
+  if (relevantStories.length > 0) {
+    parts.push(`**Stories (active/backlog):**\n${relevantStories.join('\n')}`);
+  }
+
+  // Architecture docs
+  const archFiles = await glob('architecture/*.{md,yaml,yml}', { cwd: bmadDir }).catch(() => []);
+  for (const f of archFiles.slice(0, 5)) {
+    try {
+      const content = await readFile(join(bmadDir, f), 'utf-8');
+      parts.push(`**Architecture doc (${f}):**\n${content.slice(0, 3000)}`);
+    } catch { /* skip */ }
+  }
+
+  return parts.length > 0 ? parts.join('\n\n') : null;
+}
+
 export async function generateContextDocument(rootDir: string, apiKey: string, model: string): Promise<string> {
   const client = initClient({ apiKey, model, maxTokens: 8192, temperature: 0.2 });
   const projectCtx = await collectProjectContext(rootDir);
-  const keyFiles = await collectKeyFiles(rootDir);
+  const [keyFiles, bmadContext] = await Promise.all([
+    collectKeyFiles(rootDir),
+    collectBmadContext(rootDir),
+  ]);
 
   const filesSection = keyFiles
     .map(f => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
     .join('\n\n');
+
+  const bmadSection = bmadContext
+    ? `\n## BMad Project State\n${bmadContext}\n`
+    : '';
+
+  const bmadOutputSection = bmadContext
+    ? `\n## Current Work (BMad)\n(Active epics, in-progress stories, and their acceptance criteria — derived from the BMad state above)\n`
+    : '';
 
   const prompt = `You are a senior software architect. Analyze this project and produce a comprehensive **Project Knowledge Base** document in Markdown.
 
@@ -88,7 +163,7 @@ export async function generateContextDocument(rootDir: string, apiKey: string, m
 - Files: ${projectCtx.stats.files}, Lines: ${projectCtx.stats.lines}
 - Runtime deps: ${projectCtx.dependencies.runtime.slice(0, 20).join(', ')}
 - Dev deps: ${projectCtx.dependencies.dev.slice(0, 15).join(', ')}
-
+${bmadSection}
 ## Source Files
 ${filesSection}
 
@@ -115,7 +190,7 @@ Write a document with these exact sections (fill ALL of them based on the actual
 
 ## Development
 (How to install, run, build, test — exact commands if visible)
-
+${bmadOutputSection}
 ## Important Notes
 (Gotchas, non-obvious constraints, things to be careful about)
 

@@ -209,6 +209,44 @@ function printMcpStatus(mcp: McpManager, servers: import('../../core/config.js')
   console.log(chalk.gray('─'.repeat(60)));
 }
 
+const MODEL_CONTEXT_WINDOW: Record<string, number> = {
+  'deepseek-v4-flash':   1_000_000,
+  'deepseek-chat':         128_000,
+  'deepseek-reasoner':      64_000,
+  'deepseek-v4-pro':        64_000,
+};
+
+function getContextWindow(model: string): number {
+  if (MODEL_CONTEXT_WINDOW[model]) return MODEL_CONTEXT_WINDOW[model];
+  if (model.includes('flash'))    return 1_000_000;
+  if (model.includes('reasoner')) return 64_000;
+  return 128_000;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
+function printTokenUsage(usage: { promptTokens: number; completionTokens: number }, model: string): void {
+  const ctx = getContextWindow(model);
+  const pct = (usage.promptTokens / ctx) * 100;
+  const bar = buildUsageBar(pct, 20);
+  const color = pct > 80 ? chalk.red : pct > 50 ? chalk.yellow : chalk.green;
+  console.log(
+    chalk.gray('  ctx ') +
+    color(bar) +
+    chalk.gray(` ${formatTokens(usage.promptTokens)}/${formatTokens(ctx)}`) +
+    chalk.dim(`  +${formatTokens(usage.completionTokens)} out`)
+  );
+}
+
+function buildUsageBar(pct: number, width: number): string {
+  const filled = Math.round((pct / 100) * width);
+  return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
+}
+
 function printHelp(): void {
   const cmds: [string, string][] = [
     ['/menu',           'открыть интерактивное меню (MCP, модель, контекст...)'],
@@ -740,7 +778,7 @@ Guidelines:
     try {
       console.log(''); // blank line before response
 
-      const { messages: updatedMsgs, finalContent } = await client.runToolLoopStream(
+      const { messages: updatedMsgs, finalContent, usage } = await client.runToolLoopStream(
         messages,
         allTools,
         async (name, args) => {
@@ -766,7 +804,12 @@ Guidelines:
 
       // Ensure spinner is stopped and newline is printed
       if (spinner.isSpinning) spinner.stop();
-      process.stdout.write('\n\n');
+      process.stdout.write('\n');
+
+      if (usage) {
+        printTokenUsage(usage, model);
+      }
+      process.stdout.write('\n');
 
       // Unused, suppress
       void currentToolLabel;
