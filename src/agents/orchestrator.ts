@@ -15,6 +15,7 @@ import { TesterAgent, PerformanceAuditorAgent } from './tester.js';
 import type { ProjectContext } from '../core/context.js';
 import { initMcp } from '../core/mcp.js';
 import { readProjectFile, writeProjectFile, renderDiff } from '../core/file-manager.js';
+import { runPostApplyChecks } from '../core/post-apply.js';
 
 export type AgentFamily = 'frontend' | 'backend' | 'fullstack' | 'auto';
 export type OrchestrationMode = 'full' | 'light' | 'developer-only';
@@ -186,6 +187,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
   logger.newline();
 
   const agentResults: AgentResult[] = [];
+  const failedAgents: { name: string; error: string }[] = [];
   const allFileChanges: Map<string, 'created' | 'modified'> = new Map();
 
   // confirmWrites defaults to true — always ask before touching the filesystem
@@ -209,6 +211,11 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
 
   // Collect all pending writes across all agents (dry-run mode)
   const allPendingWrites = new Map<string, { content: string; description?: string }>();
+
+  // Sequential critical agents — if one fails, pipeline cannot meaningfully continue
+  const CRITICAL_AGENTS = new Set(['Analyst', 'Frontend Analyst', 'Backend Analyst',
+    'Architect', 'Frontend Architect', 'Backend Architect',
+    'Developer', 'Frontend Developer', 'Backend Developer']);
 
   const totalSteps = filteredPipeline.length;
 
@@ -234,7 +241,9 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
           stepInfo: { current: stepNum, total: totalSteps, parallel: true },
         }))
       );
-      for (const outcome of settled) {
+      for (let i = 0; i < settled.length; i++) {
+        const outcome = settled[i];
+        const agentName = (step[i] as BaseAgent).name;
         if (outcome.status === 'fulfilled') {
           agentResults.push(outcome.value);
           trackFileChanges(outcome.value.fileChanges);
@@ -242,7 +251,9 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
             allPendingWrites.set(path, entry);
           }
         } else {
-          logger.error(`Агент завершился с ошибкой: ${(outcome.reason as Error).message}`);
+          const errMsg = (outcome.reason as Error).message;
+          failedAgents.push({ name: agentName, error: errMsg });
+          logger.error(`Агент ${agentName} завершился с ошибкой: ${errMsg}`);
         }
       }
       logger.newline();
@@ -261,7 +272,15 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
         }
         logger.newline();
       } catch (e) {
-        logger.error(`Агент ${step.name} завершился с ошибкой: ${(e as Error).message}`);
+        const errMsg = (e as Error).message;
+        failedAgents.push({ name: step.name, error: errMsg });
+        logger.error(`Агент ${step.name} завершился с ошибкой: ${errMsg}`);
+
+        // Critical agent failed — no point running downstream agents without its output
+        if (CRITICAL_AGENTS.has(step.name)) {
+          logger.warn(`Пайплайн остановлен: ${step.name} не выполнил задачу, следующие агенты зависят от его результата.`);
+          break;
+        }
       }
     }
   }
@@ -271,13 +290,19 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
     await confirmAndApplyWrites(allPendingWrites, rootDir, allFileChanges);
   }
 
+  // ── Post-apply: build / lint / typecheck ──────────────────────────────────
+  const changedPaths = [...allFileChanges.keys()];
+  if (changedPaths.length > 0) {
+    await runPostApplyChecks({ rootDir, client, model, projectContext: projectCtx, changedFiles: changedPaths });
+  }
+
   const filesCreated = [...allFileChanges.entries()].filter(([, v]) => v === 'created').map(([k]) => k);
   const filesModified = [...allFileChanges.entries()].filter(([, v]) => v === 'modified').map(([k]) => k);
 
   const summary = buildSummary(options.task, agentResults, filesCreated, filesModified);
 
   // Display final summary
-  displayFinalSummary(options.task, agentResults, filesCreated, filesModified, Date.now() - start);
+  displayFinalSummary(options.task, agentResults, failedAgents, filesCreated, filesModified, Date.now() - start);
 
   return {
     task: options.task,
@@ -374,42 +399,77 @@ function buildSummary(
 function displayFinalSummary(
   task: string,
   results: AgentResult[],
+  failed: { name: string; error: string }[],
   filesCreated: string[],
   filesModified: string[],
   durationMs: number
 ): void {
   logger.newline();
 
+  const hasFailures = failed.length > 0;
+  const hasSuccesses = results.length > 0;
+
+  // Determine overall status
+  let statusLine: string;
+  let borderColor: 'green' | 'yellow' | 'red';
+
+  if (!hasFailures) {
+    statusLine = chalk.bold.green('✅ Задача выполнена');
+    borderColor = 'green';
+  } else if (hasSuccesses) {
+    statusLine = chalk.bold.yellow(`⚠️  Задача выполнена частично  (${failed.length} агент(а) не справились)`);
+    borderColor = 'yellow';
+  } else {
+    statusLine = chalk.bold.red('❌ Задача не выполнена — все агенты завершились с ошибкой');
+    borderColor = 'red';
+  }
+
   const lines: string[] = [
-    chalk.bold.green('✅ Task Complete'),
+    statusLine,
     '',
-    chalk.gray(`Task: ${task}`),
+    chalk.gray(`Задача: ${task}`),
     '',
   ];
 
+  // Successful agents
   for (const r of results) {
-    lines.push(`  ${chalk.green('✓')} ${r.emoji ?? ''} ${chalk.bold(r.agentName)} — ${chalk.gray((r.duration / 1000).toFixed(1) + 's')}`);
+    lines.push(`  ${chalk.green('✓')}  ${r.emoji ?? ''} ${chalk.bold(r.agentName)}  ${chalk.dim((r.duration / 1000).toFixed(1) + 's')}`);
+  }
+
+  // Failed agents
+  if (failed.length > 0) {
+    if (hasSuccesses) lines.push('');
+    for (const f of failed) {
+      const isTimeout = /timed out|timeout/i.test(f.error);
+      const reason = isTimeout ? chalk.dim('таймаут DeepSeek') : chalk.dim(f.error.slice(0, 60));
+      lines.push(`  ${chalk.red('✖')}  ${chalk.bold(f.name)}  ${reason}`);
+    }
+    lines.push('');
+    if (failed.some(f => /timed out|timeout/i.test(f.error))) {
+      lines.push(chalk.dim('  Совет: запустите задачу снова или разбейте её на меньшие шаги.'));
+      lines.push(chalk.dim('  Используйте: didev agent --mode light "<задача>"'));
+    }
   }
 
   if (filesCreated.length > 0) {
     lines.push('');
-    lines.push(chalk.bold('Files created:'));
+    lines.push(chalk.bold('Создано файлов:'));
     filesCreated.forEach(f => lines.push(`  ${chalk.green('+')} ${f}`));
   }
 
   if (filesModified.length > 0) {
     lines.push('');
-    lines.push(chalk.bold('Files modified:'));
+    lines.push(chalk.bold('Изменено файлов:'));
     filesModified.forEach(f => lines.push(`  ${chalk.yellow('~')} ${f}`));
   }
 
   lines.push('');
-  lines.push(chalk.gray(`Total time: ${(durationMs / 1000).toFixed(1)}s`));
+  lines.push(chalk.gray(`Время: ${(durationMs / 1000).toFixed(1)}s`));
 
   console.log(
     boxen(lines.join('\n'), {
       padding: 1,
-      borderColor: 'green',
+      borderColor,
       borderStyle: 'round',
     })
   );

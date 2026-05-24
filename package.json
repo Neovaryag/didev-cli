@@ -1,6 +1,6 @@
 {
   "name": "didev",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Professional AI-powered CLI for developers using DeepSeek API",
   "type": "module",
   "main": "dist/index.js",
