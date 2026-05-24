@@ -14,6 +14,7 @@ import { ReviewerAgent, SecurityAuditorAgent } from './reviewer.js';
 import { TesterAgent, PerformanceAuditorAgent } from './tester.js';
 import type { ProjectContext } from '../core/context.js';
 import { initMcp } from '../core/mcp.js';
+import { mergeBundledServers } from '../core/bundled-mcp.js';
 import { readProjectFile, writeProjectFile, renderDiff } from '../core/file-manager.js';
 import { runPostApplyChecks } from '../core/post-apply.js';
 
@@ -159,7 +160,7 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
   const contextDocument = await loadContextDocument(rootDir) ?? undefined;
 
   // Connect MCP servers before agents start — shared via singleton McpManager
-  const mcp = await initMcp(config.mcp?.servers ?? []);
+  const mcp = await initMcp(mergeBundledServers(config.mcp?.servers ?? []));
   if (mcp.tools.length > 0) {
     logger.success(`MCP: ${mcp.tools.length} tool(s) available to agents`);
   }

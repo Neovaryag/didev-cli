@@ -121,14 +121,27 @@ export async function isBundledServerReady(def: BundledServerDef): Promise<boole
   }
 }
 
-// Merges bundled servers into an existing list — skips ones already present by name
+// Merges bundled servers into an existing list.
+// For bundled servers already present in config, re-evaluates `enabled` at runtime
+// (env vars may have changed since init wrote the config).
 export function mergeBundledServers(existing: McpServerConfig[]): McpServerConfig[] {
-  const names = new Set(existing.map(s => s.name));
-  const result = [...existing];
+  const bundledByName = new Map(BUNDLED_SERVERS.map(d => [d.name, d]));
+  const existingNames = new Set(existing.map(s => s.name));
+
+  const result: McpServerConfig[] = existing.map(s => {
+    const def = bundledByName.get(s.name);
+    if (def) {
+      // Re-compute enabled at runtime so no-auth servers always start
+      return { ...s, enabled: resolveEnabled(def) };
+    }
+    return s;
+  });
+
   for (const def of BUNDLED_SERVERS) {
-    if (!names.has(def.name)) {
+    if (!existingNames.has(def.name)) {
       result.push(toBundledMcpConfig(def));
     }
   }
+
   return result;
 }
