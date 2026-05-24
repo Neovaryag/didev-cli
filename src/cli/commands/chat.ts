@@ -14,6 +14,8 @@ import { createSession, saveSession, loadSession, listSessions } from '../../cor
 import { readProjectFile, writeProjectFile, renderDiff } from '../../core/file-manager.js';
 import { getDiff } from '../../utils/git.js';
 import { initMcp } from '../../core/mcp.js';
+import type { McpManager } from '../../core/mcp.js';
+import { mergeBundledServers } from '../../core/bundled-mcp.js';
 import { glob } from 'glob';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
@@ -171,7 +173,7 @@ async function executeToolCall(
 
 function printHeader(projectName: string, model: string, apiKey: string): void {
   const keyStatus = apiKey
-    ? chalk.green('● ') + chalk.gray(`${apiKey.slice(0, 6)}…${apiKey.slice(-4)}`)
+    ? chalk.green('●') + chalk.gray(` ${apiKey.slice(0, 6)}…${apiKey.slice(-4)}`)
     : chalk.red('● key missing');
 
   const line1 = chalk.bold.cyan('didev') + chalk.gray(` v${PKG_VERSION}`) +
@@ -183,9 +185,34 @@ function printHeader(projectName: string, model: string, apiKey: string): void {
   console.log(chalk.gray('─'.repeat(60)));
 }
 
+function printMcpStatus(mcp: McpManager, servers: import('../../core/config.js').McpServerConfig[]): void {
+  if (servers.length === 0) return;
+
+  const statuses = mcp.getServerStatuses();
+  if (statuses.length === 0) return;
+
+  const parts: string[] = [];
+  for (const s of statuses) {
+    if (s.status === 'connected') {
+      parts.push(chalk.green('●') + chalk.white(` ${s.name}`) + chalk.dim(` (${s.toolCount})`));
+    } else if (s.status === 'failed') {
+      parts.push(chalk.red('✕') + chalk.gray(` ${s.name}`));
+    } else {
+      parts.push(chalk.gray('○') + chalk.gray(` ${s.name}`));
+    }
+  }
+
+  const connected = statuses.filter(s => s.status === 'connected').length;
+  const total = statuses.length;
+  const label = chalk.dim('MCP') + chalk.gray(` ${connected}/${total}  `);
+  console.log(label + parts.join(chalk.gray('  ·  ')));
+  console.log(chalk.gray('─'.repeat(60)));
+}
+
 function printHelp(): void {
   const cmds: [string, string][] = [
-    ['/agent <task>',    'запустить agent pipeline (Analyst→Architect→Dev→Review)'],
+    ['/menu',           'открыть интерактивное меню (MCP, модель, контекст...)'],
+    ['/agent <task>',   'запустить agent pipeline (Analyst→Architect→Dev→Review)'],
     ['/review',         'code review изменённых файлов'],
     ['/refactor [hint]','AI-рефакторинг кода'],
     ['/apply',          'применить отложенные изменения файлов'],
@@ -357,7 +384,7 @@ export async function runChat(options: ChatOptions = {}): Promise<void> {
 
   const rootDir = process.cwd();
   const projectCtx = await collectProjectContext(rootDir);
-  const model = options.model ?? config.api.model;
+  let model = options.model ?? config.api.model;
   const contextDoc = await loadContextDocument(rootDir);
 
   let systemPrompt = `You are didev, an expert AI coding assistant integrated with the developer's project.
@@ -381,11 +408,9 @@ Guidelines:
     }
   }
 
-  const mcp = await initMcp(config.mcp?.servers ?? []);
+  const mcpServers = mergeBundledServers(config.mcp?.servers ?? []);
+  const mcp = await initMcp(mcpServers);
   const mcpTools = mcp.tools;
-  if (mcpTools.length > 0) {
-    logger.success(`MCP: ${mcpTools.length} tool(s) подключено`);
-  }
 
   const allTools: Tool[] = [...TOOLS, ...mcpTools];
   const messages: Message[] = [{ role: 'system', content: systemPrompt }];
@@ -400,6 +425,7 @@ Guidelines:
 
   // ── Header ──
   printHeader(projectCtx.name, model, apiKey);
+  printMcpStatus(mcp, mcpServers);
   console.log(chalk.gray('  Введите сообщение или /help для справки. /exit для выхода.\n'));
 
   const rl = readline.createInterface({
@@ -437,6 +463,49 @@ Guidelines:
       const arg = spaceIdx === -1 ? '' : input.slice(spaceIdx + 1).trim();
 
       switch (cmd) {
+
+        // ── menu ──
+        case 'menu': {
+          rl.pause();
+          try {
+            const { runMenu } = await import('./menu.js');
+            const result = await runMenu(true); // inChat = true
+
+            if (result.action === 'exit') {
+              rl.close();
+              return;
+            }
+
+            if (result.action === 'agent' && result.agentTask) {
+              try {
+                const { runOrchestration } = await import('../../agents/orchestrator.js');
+                await runOrchestration({
+                  task: result.agentTask,
+                  rootDir,
+                  model,
+                  mode: result.agentMode,
+                  skipAgents: result.agentSkip,
+                });
+              } catch (e) {
+                logger.error(`Agent pipeline: ${(e as Error).message}`);
+              }
+            }
+
+            // If model changed in menu — reload from config
+            if (result.action === 'back' || result.action === 'chat') {
+              const newConfig = await (await import('../../core/config.js')).loadConfig();
+              if (newConfig.api.model !== model) {
+                model = newConfig.api.model;
+                logger.success(`Модель обновлена: ${chalk.bold(model)}`);
+              }
+            }
+          } catch (e) {
+            logger.error(`Menu: ${(e as Error).message}`);
+          } finally {
+            rl.resume();
+          }
+          continue;
+        }
 
         // ── exit ──
         case 'exit':

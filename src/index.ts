@@ -191,6 +191,29 @@ bmadCmd
     await runBmadReview();
   });
 
+// ── check ─────────────────────────────────────────────────────────────────────
+program
+  .command('check')
+  .description('Run build/lint/typecheck/tests and optionally AI-fix errors')
+  .option('-s, --scripts <names>', 'Comma-separated script names to run (e.g. build,lint)')
+  .option('--fix', 'Auto-suggest AI fix if checks fail (non-interactive)')
+  .action(async (opts) => {
+    const { runCheckCommand } = await import('./core/post-apply.js');
+    await runCheckCommand({
+      scripts: opts.scripts ? (opts.scripts as string).split(',').map((s: string) => s.trim()) : undefined,
+      fix: opts.fix,
+    });
+  });
+
+// ── menu ──────────────────────────────────────────────────────────────────────
+program
+  .command('menu')
+  .description('Open interactive menu (agents, MCP, context, model, settings)')
+  .action(async () => {
+    const { runMenu } = await import('./cli/commands/menu.js');
+    await launchMenuResult(await runMenu());
+  });
+
 // ── mcp ───────────────────────────────────────────────────────────────────────
 const mcpCmd = program
   .command('mcp')
@@ -233,6 +256,27 @@ mcpCmd.action(async () => {
   const { runMcpList } = await import('./cli/commands/mcp.js');
   await runMcpList();
 });
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+import type { MenuResult } from './cli/commands/menu.js';
+
+async function launchMenuResult(result: MenuResult): Promise<void> {
+  if (result.action === 'chat') {
+    const { runChat } = await import('./cli/commands/chat.js');
+    await runChat({ model: result.model });
+  } else if (result.action === 'agent' && result.agentTask) {
+    const { loadConfig: lc } = await import('./core/config.js');
+    const cfg = await lc();
+    const { runOrchestration } = await import('./agents/orchestrator.js');
+    await runOrchestration({
+      task: result.agentTask,
+      rootDir: process.cwd(),
+      model: result.model ?? cfg.api.model,
+      mode: result.agentMode,
+      skipAgents: result.agentSkip,
+    });
+  }
+}
 
 // ── error handling ────────────────────────────────────────────────────────────
 program.on('command:*', (operands: string[]) => {
@@ -281,18 +325,20 @@ process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 
 const _rawArgs = process.argv.slice(2);
 
-// Show banner only for subcommands (not for bare invocation or --version)
+// Show banner for subcommands only (bare invocation and --version skip it)
 const _isVersionFlag = _rawArgs.includes('--version') || _rawArgs.includes('-V');
 const _isBareInvocation = _rawArgs.length === 0;
+const _isMenuCommand = _rawArgs[0] === 'menu';
 
-if (!_isVersionFlag && !_isBareInvocation) {
+if (!_isVersionFlag && !_isBareInvocation && !_isMenuCommand) {
   printBanner(PKG_VERSION);
 }
 
-// Bare `didev` (no args) → open interactive shell immediately
+// Bare `didev` (no args) → open interactive menu
 if (_isBareInvocation) {
-  const { runChat } = await import('./cli/commands/chat.js');
-  await runChat();
+  const { runMenu } = await import('./cli/commands/menu.js');
+  const result = await runMenu();
+  await launchMenuResult(result);
   process.exit(0);
 }
 

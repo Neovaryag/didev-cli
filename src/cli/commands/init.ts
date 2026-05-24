@@ -1,5 +1,8 @@
-import { mkdir, writeFile, access } from 'fs/promises';
+import { mkdir, writeFile, access, readFile } from 'fs/promises';
 import { join } from 'path';
+import { homedir } from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import yaml from 'js-yaml';
@@ -8,6 +11,9 @@ import { collectProjectContext } from '../../core/context.js';
 import { loadConfig, saveConfig } from '../../core/config.js';
 import type { DidevConfig } from '../../core/config.js';
 import { generateContextDocument } from './context.js';
+import { BUNDLED_SERVERS, mergeBundledServers, isBundledServerReady } from '../../core/bundled-mcp.js';
+
+const execFileAsync = promisify(execFile);
 
 async function exists(p: string): Promise<boolean> {
   try { await access(p); return true; } catch { return false; }
@@ -157,7 +163,13 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
     },
   };
 
+  // Merge bundled MCP servers into config
+  config.mcp.servers = mergeBundledServers(config.mcp.servers);
+
   await saveConfig(config, rootDir);
+
+  // Clone + build GitHub-based bundled servers that don't require auth
+  await setupBundledGitServers();
 
   // Create context.md — AI-generated if key is available, otherwise a template
   let contextMd: string;
@@ -193,6 +205,48 @@ export async function runInit(options: InitOptions = {}): Promise<void> {
     logger.newline();
     logger.warn('API key not set. Run: ' + chalk.cyan('didev config set DEEPSEEK_API_KEY=sk-xxx'));
     logger.dim('Then generate project knowledge base: ' + chalk.cyan('didev context update'));
+  }
+}
+
+async function setupBundledGitServers(): Promise<void> {
+  const mcpDir = join(homedir(), '.didev', 'mcp');
+  await mkdir(mcpDir, { recursive: true });
+
+  const toSetup = BUNDLED_SERVERS.filter(s => s.gitRepo && !s.requiresAuth);
+
+  for (const def of toSetup) {
+    const ready = await isBundledServerReady(def);
+    if (ready) continue;
+
+    const repoName = def.gitRepo!.split('/').pop()!.replace(/\.git$/, '');
+    const targetDir = join(mcpDir, repoName);
+
+    const spinner = logger.spinner(`Setting up bundled MCP: ${chalk.bold(def.displayName)}...`).start();
+    try {
+      const alreadyCloned = await exists(join(targetDir, '.git'));
+
+      if (!alreadyCloned) {
+        await execFileAsync('git', ['clone', '--depth', '1', '--quiet', def.gitRepo!, targetDir], { shell: true });
+      }
+
+      // Install + build if package.json exists
+      const hasPkg = await exists(join(targetDir, 'package.json'));
+      if (hasPkg) {
+        await execFileAsync('npm', ['install', '--prefer-offline', '--silent'], { cwd: targetDir, shell: true });
+        let scripts: Record<string, string> = {};
+        try {
+          const raw = await readFile(join(targetDir, 'package.json'), 'utf-8');
+          scripts = ((JSON.parse(raw) as Record<string, unknown>)['scripts'] ?? {}) as Record<string, string>;
+        } catch { /* ignore */ }
+        if (scripts['build']) {
+          await execFileAsync('npm', ['run', 'build'], { cwd: targetDir, shell: true });
+        }
+      }
+
+      spinner.succeed(`${chalk.bold(def.displayName)} ready`);
+    } catch (e) {
+      spinner.warn(`${def.displayName}: ${(e as Error).message}`);
+    }
   }
 }
 

@@ -12,6 +12,15 @@ export interface McpServerConfig {
   enabled?: boolean;
 }
 
+export type McpConnectionStatus = 'connected' | 'failed' | 'disabled' | 'skipped';
+
+export interface McpServerStatus {
+  name: string;
+  status: McpConnectionStatus;
+  toolCount: number;
+  error?: string;
+}
+
 // MCP tool with server attribution, compatible with DeepSeek Tool format
 export interface McpTool extends Tool {
   _mcpServer: string;
@@ -28,6 +37,7 @@ export class McpManager {
   private clients = new Map<string, Client>();
   private toolEntries = new Map<string, ToolEntry>(); // qualifiedName → entry
   private mcpTools: McpTool[] = [];
+  private serverStatuses = new Map<string, McpServerStatus>();
 
   get tools(): McpTool[] {
     return this.mcpTools;
@@ -39,12 +49,27 @@ export class McpManager {
 
   // Connect to all enabled servers. Non-fatal: logs warnings on failure.
   async connectAll(servers: McpServerConfig[]): Promise<void> {
+    // Track disabled servers immediately
+    for (const s of servers) {
+      if (s.enabled === false) {
+        this.serverStatuses.set(s.name, { name: s.name, status: 'disabled', toolCount: 0 });
+      }
+    }
+
     const enabled = servers.filter(s => s.enabled !== false);
     if (enabled.length === 0) return;
 
     await Promise.allSettled(
       enabled.map(s => this.connectOne(s))
     );
+  }
+
+  getServerStatuses(): McpServerStatus[] {
+    return [...this.serverStatuses.values()];
+  }
+
+  getServerStatus(name: string): McpServerStatus | undefined {
+    return this.serverStatuses.get(name);
   }
 
   async connectOne(config: McpServerConfig): Promise<void> {
@@ -93,9 +118,21 @@ export class McpManager {
         });
       }
 
+      this.serverStatuses.set(config.name, {
+        name: config.name,
+        status: 'connected',
+        toolCount: tools.length,
+      });
       logger.success(`MCP: "${config.name}" connected — ${tools.length} tool(s)`);
     } catch (e) {
-      logger.warn(`MCP: "${config.name}" failed — ${(e as Error).message}`);
+      const errMsg = (e as Error).message;
+      this.serverStatuses.set(config.name, {
+        name: config.name,
+        status: 'failed',
+        toolCount: 0,
+        error: errMsg,
+      });
+      logger.warn(`MCP: "${config.name}" failed — ${errMsg}`);
     }
   }
 
@@ -143,6 +180,7 @@ export class McpManager {
     this.clients.clear();
     this.toolEntries.clear();
     this.mcpTools = [];
+    this.serverStatuses.clear();
   }
 }
 
