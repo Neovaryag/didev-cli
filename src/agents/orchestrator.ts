@@ -315,6 +315,9 @@ export async function runOrchestration(options: OrchestrationOptions): Promise<O
   };
 }
 
+// Session-level flag: once the user picks "apply all", skip all future prompts
+let _sessionAutoApply = false;
+
 async function confirmAndApplyWrites(
   pendingWrites: Map<string, { content: string; description?: string }>,
   rootDir: string,
@@ -339,7 +342,20 @@ async function confirmAndApplyWrites(
   console.log(boxen(lines.join('\n'), { padding: 1, borderColor: 'yellow', borderStyle: 'round' }));
   logger.newline();
 
-  // Show full diffs per file
+  // Auto-apply mode: show diff inline, skip prompts
+  if (_sessionAutoApply) {
+    console.log(chalk.dim('  ⚡ Автоприменение (режим сессии)'));
+    logger.newline();
+    for (const [path, { content }] of pendingWrites) {
+      const existed = await readProjectFile(path, rootDir).then(() => true).catch(() => false);
+      await writeProjectFile(path, content, rootDir);
+      allFileChanges.set(path, existed ? 'modified' : 'created');
+      logger.success(`Записан: ${path}`);
+    }
+    return;
+  }
+
+  // Show diff then action choice
   const { showDiffs } = await inquirer.prompt([{
     type: 'confirm',
     name: 'showDiffs',
@@ -357,14 +373,37 @@ async function confirmAndApplyWrites(
     logger.newline();
   }
 
-  const { apply } = await inquirer.prompt([{
-    type: 'confirm',
-    name: 'apply',
+  const { action } = await inquirer.prompt<{ action: 'apply' | 'apply-all' | 'skip' }>([{
+    type: 'list',
+    name: 'action',
     message: `Применить ${pendingWrites.size} файл(ов)?`,
-    default: true,
+    choices: [
+      {
+        name: `${chalk.green('✔')}  Принять`,
+        value: 'apply',
+        short: 'Принято',
+      },
+      {
+        name: `${chalk.cyan('⚡')}  Принять для всех запросов в этой сессии`,
+        value: 'apply-all',
+        short: 'Автоприменение включено',
+      },
+      {
+        name: `${chalk.red('✕')}  Отклонить`,
+        value: 'skip',
+        short: 'Отклонено',
+      },
+    ],
+    default: 'apply',
   }]);
 
-  if (apply) {
+  if (action === 'apply-all') {
+    _sessionAutoApply = true;
+    console.log(chalk.cyan('  ⚡ Режим автоприменения включён до конца сессии'));
+    logger.newline();
+  }
+
+  if (action === 'apply' || action === 'apply-all') {
     for (const [path, { content }] of pendingWrites) {
       const existed = await readProjectFile(path, rootDir).then(() => true).catch(() => false);
       await writeProjectFile(path, content, rootDir);
