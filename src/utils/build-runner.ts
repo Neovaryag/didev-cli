@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { readFile, access } from 'fs/promises';
+import { readFile, access, readdir } from 'fs/promises';
 import { join } from 'path';
 import chalk from 'chalk';
 import { logger } from './logger.js';
@@ -10,6 +10,8 @@ export interface BuildScript {
   command: string;
   args: string[];
   emoji: string;
+  /** Working directory override — defaults to rootDir if omitted */
+  cwd?: string;
 }
 
 export interface BuildResult {
@@ -32,17 +34,33 @@ export interface ParsedError {
 
 // ── script detection ──────────────────────────────────────────────────────────
 
-const KNOWN_SCRIPTS: Record<string, Omit<BuildScript, 'command' | 'args'>> = {
-  build:     { name: 'build',     label: 'Build',      emoji: '🔨' },
-  typecheck: { name: 'typecheck', label: 'Type check',  emoji: '🔍' },
-  'type-check': { name: 'typecheck', label: 'Type check', emoji: '🔍' },
-  tsc:       { name: 'tsc',       label: 'TypeScript',  emoji: '🔍' },
-  lint:      { name: 'lint',      label: 'Lint',        emoji: '🧹' },
-  'lint:fix': { name: 'lint:fix', label: 'Lint (fix)',  emoji: '🧹' },
-  test:      { name: 'test',      label: 'Tests',       emoji: '🧪' },
-  'test:ci': { name: 'test:ci',   label: 'Tests (CI)',  emoji: '🧪' },
-  validate:  { name: 'validate',  label: 'Validate',    emoji: '✅' },
-  check:     { name: 'check',     label: 'Check',       emoji: '✅' },
+const KNOWN_SCRIPTS: Record<string, Omit<BuildScript, 'command' | 'args' | 'cwd'>> = {
+  // Universal
+  build:          { name: 'build',          label: 'Build',           emoji: '🔨' },
+  typecheck:      { name: 'typecheck',      label: 'Type check',      emoji: '🔍' },
+  'type-check':   { name: 'type-check',     label: 'Type check',      emoji: '🔍' },
+  tsc:            { name: 'tsc',            label: 'TypeScript',       emoji: '🔍' },
+  lint:           { name: 'lint',           label: 'Lint',             emoji: '🧹' },
+  'lint:fix':     { name: 'lint:fix',       label: 'Lint (fix)',       emoji: '🧹' },
+  test:           { name: 'test',           label: 'Tests',            emoji: '🧪' },
+  'test:ci':      { name: 'test:ci',        label: 'Tests (CI)',       emoji: '🧪' },
+  'test:unit':    { name: 'test:unit',      label: 'Unit tests',       emoji: '🧪' },
+  validate:       { name: 'validate',       label: 'Validate',         emoji: '✅' },
+  check:          { name: 'check',          label: 'Check',            emoji: '✅' },
+  // Frontend / UI
+  preview:        { name: 'preview',        label: 'Preview',          emoji: '👁️' },
+  serve:          { name: 'serve',          label: 'Serve',            emoji: '🌐' },
+  'build:prod':   { name: 'build:prod',     label: 'Build (prod)',     emoji: '🔨' },
+  'build:ssr':    { name: 'build:ssr',      label: 'Build (SSR)',      emoji: '🔨' },
+  storybook:      { name: 'storybook',      label: 'Storybook',        emoji: '📖' },
+  'build-storybook': { name: 'build-storybook', label: 'Build Storybook', emoji: '📖' },
+  // E2E / integration
+  e2e:            { name: 'e2e',            label: 'E2E tests',        emoji: '🌐' },
+  'test:e2e':     { name: 'test:e2e',       label: 'E2E tests',        emoji: '🌐' },
+  cypress:        { name: 'cypress',        label: 'Cypress',          emoji: '🌲' },
+  'cy:run':       { name: 'cy:run',         label: 'Cypress (run)',    emoji: '🌲' },
+  playwright:     { name: 'playwright',     label: 'Playwright',       emoji: '🎭' },
+  'test:playwright': { name: 'test:playwright', label: 'Playwright',   emoji: '🎭' },
 };
 
 async function fileExists(p: string): Promise<boolean> {
@@ -119,13 +137,62 @@ async function detectGradleScripts(rootDir: string): Promise<BuildScript[]> {
   ];
 }
 
+// Angular projects use `ng` directly (angular.json defines project scripts)
+async function detectAngularScripts(dir: string, labelSuffix = ''): Promise<BuildScript[]> {
+  const hasAngular = await fileExists(join(dir, 'angular.json'));
+  if (!hasAngular) return [];
+  const suffix = labelSuffix ? ` (${labelSuffix})` : '';
+  return [
+    { name: 'build',       label: `Build${suffix}`,          emoji: '🔨', command: 'ng', args: ['build'],       cwd: dir },
+    { name: 'test',        label: `Tests${suffix}`,           emoji: '🧪', command: 'ng', args: ['test', '--watch=false'], cwd: dir },
+    { name: 'lint',        label: `Lint${suffix}`,            emoji: '🧹', command: 'ng', args: ['lint'],        cwd: dir },
+    { name: 'e2e',         label: `E2E tests${suffix}`,       emoji: '🌐', command: 'ng', args: ['e2e'],         cwd: dir },
+    { name: 'build:prod',  label: `Build (prod)${suffix}`,   emoji: '🔨', command: 'ng', args: ['build', '--configuration=production'], cwd: dir },
+  ];
+}
+
+// Scan common UI subdirectory names for their own package.json / angular.json
+const UI_SUBDIRS = ['frontend', 'ui', 'client', 'web', 'app', 'webapp', 'portal', 'admin'];
+
+async function detectSubdirFrontend(rootDir: string): Promise<BuildScript[]> {
+  const results: BuildScript[] = [];
+
+  let entries: string[] = [];
+  try {
+    const dirents = await readdir(rootDir, { withFileTypes: true });
+    entries = dirents.filter(d => d.isDirectory()).map(d => d.name);
+  } catch {
+    return [];
+  }
+
+  for (const name of entries) {
+    if (!UI_SUBDIRS.includes(name.toLowerCase())) continue;
+    const subdir = join(rootDir, name);
+
+    const [nodeScripts, angularScripts] = await Promise.all([
+      detectNodeScripts(subdir),
+      detectAngularScripts(subdir, name),
+    ]);
+
+    // Tag node scripts with subdir label and set their cwd
+    for (const s of nodeScripts) {
+      results.push({ ...s, label: `${s.label} (${name})`, cwd: subdir });
+    }
+    results.push(...angularScripts);
+  }
+
+  return results;
+}
+
 export async function detectAvailableScripts(rootDir: string): Promise<BuildScript[]> {
-  const [node, maven, gradle] = await Promise.all([
+  const [node, angular, maven, gradle, subdirFrontend] = await Promise.all([
     detectNodeScripts(rootDir),
+    detectAngularScripts(rootDir),
     detectMavenScripts(rootDir),
     detectGradleScripts(rootDir),
+    detectSubdirFrontend(rootDir),
   ]);
-  return [...node, ...maven, ...gradle];
+  return [...node, ...angular, ...maven, ...gradle, ...subdirFrontend];
 }
 
 // ── runner ────────────────────────────────────────────────────────────────────
@@ -149,7 +216,7 @@ export async function runScript(
       isWindows ? `${script.command}.cmd` : script.command,
       script.args,
       {
-        cwd: rootDir,
+        cwd: script.cwd ?? rootDir,
         shell: isWindows,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, FORCE_COLOR: '1', NO_COLOR: undefined },
