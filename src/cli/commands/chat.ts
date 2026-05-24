@@ -229,16 +229,24 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function printTokenUsage(usage: { promptTokens: number; completionTokens: number }, model: string): void {
+function printTokenUsage(usage: { promptTokens: number; completionTokens: number; cacheHitTokens?: number; cacheMissTokens?: number }, model: string): void {
   const ctx = getContextWindow(model);
   const pct = (usage.promptTokens / ctx) * 100;
   const bar = buildUsageBar(pct, 20);
   const color = pct > 80 ? chalk.red : pct > 50 ? chalk.yellow : chalk.green;
+
+  let cacheInfo = '';
+  if (usage.cacheHitTokens !== undefined && usage.promptTokens > 0) {
+    const hitPct = Math.round((usage.cacheHitTokens / usage.promptTokens) * 100);
+    cacheInfo = chalk.dim(`  ⚡ cache ${hitPct}%`);
+  }
+
   console.log(
     chalk.gray('  ctx ') +
     color(bar) +
     chalk.gray(` ${formatTokens(usage.promptTokens)}/${formatTokens(ctx)}`) +
-    chalk.dim(`  +${formatTokens(usage.completionTokens)} out`)
+    chalk.dim(`  +${formatTokens(usage.completionTokens)} out`) +
+    cacheInfo
   );
 }
 

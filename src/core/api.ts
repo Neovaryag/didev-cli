@@ -48,16 +48,24 @@ export interface DeepSeekConfig {
   temperature?: number;
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cacheHitTokens?: number;
+  cacheMissTokens?: number;
+}
+
 export interface ChatResponse {
   content: string | null;
   reasoningContent?: string;
   toolCalls?: ToolCall[];
-  usage?: { promptTokens: number; completionTokens: number };
+  usage?: TokenUsage;
 }
 
-// Thinking models do not support temperature/top_p/etc.
+// Only deepseek-reasoner and deepseek-v4-pro are actual thinking models (no temperature support).
+// deepseek-v4-flash is a regular chat model — fast, 1M context, but NOT a thinking model.
 function isThinkingModel(model: string): boolean {
-  return model.includes('reasoner') || model.includes('v4-pro') || model.includes('v4-flash');
+  return model.includes('reasoner') || model.includes('v4-pro');
 }
 
 export class DeepSeekClient {
@@ -168,7 +176,7 @@ export class DeepSeekClient {
     options: ChatOptions = {}
   ): AsyncGenerator<
     | { type: 'content'; chunk: string }
-    | { type: 'done'; reasoningContent?: string; toolCalls?: ToolCall[]; usage?: { promptTokens: number; completionTokens: number } },
+    | { type: 'done'; reasoningContent?: string; toolCalls?: ToolCall[]; usage?: TokenUsage },
     void,
     unknown
   > {
@@ -206,7 +214,7 @@ export class DeepSeekClient {
     const decoder = new TextDecoder();
     let buffer = '';
     let reasoningContent = '';
-    let streamUsage: { promptTokens: number; completionTokens: number } | undefined;
+    let streamUsage: TokenUsage | undefined;
     const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
 
     while (true) {
@@ -247,11 +255,22 @@ export class DeepSeekClient {
                 }>;
               };
             }>;
-            usage?: { prompt_tokens: number; completion_tokens: number };
+            usage?: {
+              prompt_tokens: number;
+              completion_tokens: number;
+              total_tokens?: number;
+              prompt_cache_hit_tokens?: number;
+              prompt_cache_miss_tokens?: number;
+            };
           };
-          // usage-only chunk (sent by DeepSeek when stream_options.include_usage = true)
+          // usage-only chunk (sent before [DONE] when stream_options.include_usage = true)
           if (parsed.usage) {
-            streamUsage = { promptTokens: parsed.usage.prompt_tokens, completionTokens: parsed.usage.completion_tokens };
+            streamUsage = {
+              promptTokens: parsed.usage.prompt_tokens,
+              completionTokens: parsed.usage.completion_tokens,
+              cacheHitTokens: parsed.usage.prompt_cache_hit_tokens,
+              cacheMissTokens: parsed.usage.prompt_cache_miss_tokens,
+            };
           }
           const delta = parsed.choices[0]?.delta;
           if (!delta) continue;
@@ -277,7 +296,8 @@ export class DeepSeekClient {
         }
       }
     }
-    yield { type: 'done', reasoningContent: reasoningContent || undefined };
+    // Stream ended without [DONE] — still yield with whatever usage we collected
+    yield { type: 'done', reasoningContent: reasoningContent || undefined, usage: streamUsage };
   }
 
   // Run a tool-calling loop until the model stops requesting tools
@@ -334,10 +354,10 @@ export class DeepSeekClient {
     model?: string,
     options: ChatOptions = {},
     maxRounds = 10
-  ): Promise<{ messages: Message[]; finalContent: string; usage?: { promptTokens: number; completionTokens: number } }> {
+  ): Promise<{ messages: Message[]; finalContent: string; usage?: TokenUsage }> {
     const msgs = [...messages];
     let round = 0;
-    let lastUsage: { promptTokens: number; completionTokens: number } | undefined;
+    let lastUsage: TokenUsage | undefined;
 
     while (round < maxRounds) {
       round++;
