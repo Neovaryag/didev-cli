@@ -11,7 +11,6 @@ import {
 } from '../utils/build-runner.js';
 import type { DeepSeekClient } from './api.js';
 import type { ProjectContext } from './context.js';
-import { readProjectFile, writeProjectFile } from './file-manager.js';
 
 export interface PostApplyOptions {
   rootDir: string;
@@ -108,118 +107,71 @@ async function runAiFix(opts: {
   const { client, model, projectContext, rootDir, changedFiles, failed } = opts;
 
   const errorSummary = summarizeErrors(failed);
+  const failedScriptNames = failed.map(r => `${r.script.command} ${r.script.args.join(' ')}`).join(', ');
 
-  // Gather content of changed files
-  const fileContents: string[] = [];
-  for (const f of changedFiles.slice(0, 10)) {
-    try {
-      const content = await readProjectFile(f, rootDir);
-      fileContents.push(`=== ${f} ===\n${content}`);
-    } catch { /* file may not exist */ }
-  }
+  logger.newline();
+  logger.info(`Запускаю Developer агента для исправления ошибок в: ${failedScriptNames}`);
 
-  const spinner = logger.spinner(`AI анализирует ${failed.length} ошибок...`);
-  spinner.start();
-
-  const systemPrompt = `You are an expert ${projectContext.language} developer.
-Fix compilation/lint errors in the provided files.
-Return ONLY the fixed file contents in this exact format for each file that needs changes:
-<file path="RELATIVE/PATH">
-FILE CONTENT HERE
-</file>
-Do not add explanations outside the file blocks.`;
-
-  const userMessage = `The following build errors occurred after applying changes:
-
-${errorSummary}
-
-Changed files:
-${fileContents.join('\n\n')}
-
-Fix all errors. Return only the corrected file(s).`;
+  // Use the full Developer agent — it has read_file/write_file/run_command tools
+  // and can read related files, not just the files we already know about.
+  const task = [
+    `Fix the following build/test errors that appeared after applying recent changes.`,
+    ``,
+    `## Error output`,
+    errorSummary,
+    ``,
+    `## Changed files`,
+    changedFiles.length > 0 ? changedFiles.join('\n') : '(none listed — search with list_files)',
+    ``,
+    `## What to do`,
+    `1. Read the changed files and error messages carefully`,
+    `2. Run the failing command again to confirm the exact errors: ${failedScriptNames}`,
+    `3. Fix the root cause — minimal changes only`,
+    `4. Re-run the command to verify errors are gone`,
+  ].join('\n');
 
   try {
-    const response = await client.chat([
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userMessage },
-    ]);
+    const { DeveloperAgent } = await import('../agents/developer.js');
+    const agent = new DeveloperAgent();
+    const result = await agent.run({
+      client,
+      model,
+      projectContext,
+      rootDir,
+      task,
+      // Apply fixes immediately — post-apply is already past the confirmation gate
+      dryRun: false,
+    });
 
-    spinner.succeed('AI предложил исправления');
-
-    const aiOutput = response.content ?? '';
-    const fixedFiles = parseFileBlocks(aiOutput);
-
-    if (fixedFiles.length === 0) {
-      logger.warn('AI не предложил конкретных изменений файлов');
-      console.log(chalk.gray(aiOutput.slice(0, 1000)));
-      return;
-    }
-
-    logger.newline();
-    console.log(chalk.bold(`  Предлагаемые исправления: ${fixedFiles.length} файл(а)`));
-    for (const { path } of fixedFiles) {
-      console.log(chalk.yellow(`    ~ ${path}`));
-    }
-    logger.newline();
-
-    const { applyFix } = await inquirer.prompt<{ applyFix: boolean }>([{
-      type: 'confirm',
-      name: 'applyFix',
-      message: 'Применить исправления?',
-      default: true,
-    }]);
-
-    if (!applyFix) {
-      logger.info('Исправления отклонены');
-      return;
-    }
-
-    for (const { path, content } of fixedFiles) {
-      await writeProjectFile(path, content, rootDir);
-      logger.success(`Исправлен: ${path}`);
-    }
-
-    // Re-run the failed checks after fix
-    const { rerun } = await inquirer.prompt<{ rerun: boolean }>([{
-      type: 'confirm',
-      name: 'rerun',
-      message: 'Перезапустить проверки после исправлений?',
-      default: true,
-    }]);
-
-    if (rerun) {
+    if (result.fileChanges.length > 0) {
       logger.newline();
-      logger.info('Перезапускаем упавшие проверки...');
-      const reResults: BuildResult[] = [];
-      for (const r of failed) {
-        const result = await runScript(r.script, rootDir);
-        reResults.push(result);
+      logger.success(`Агент исправил ${result.fileChanges.length} файл(а):`);
+      for (const fc of result.fileChanges) {
+        logger.step('✓', chalk.green(`  ${fc.path}`));
       }
-      logger.newline();
-      printResultsTable(reResults);
-      const stillFailed = reResults.filter(r => !r.success);
-      if (stillFailed.length === 0) {
-        logger.success('Все проверки прошли после исправлений!');
-      } else {
-        logger.warn(`Остались ошибки в ${stillFailed.length} проверках. Запустите didev check для повторного анализа.`);
-      }
+    }
+
+    // Re-run failed checks automatically to confirm the fix
+    logger.newline();
+    logger.info('Перезапускаем упавшие проверки...');
+    const reResults: BuildResult[] = [];
+    for (const r of failed) {
+      reResults.push(await runScript(r.script, rootDir));
+    }
+    logger.newline();
+    printResultsTable(reResults);
+    const stillFailed = reResults.filter(r => !r.success);
+    if (stillFailed.length === 0) {
+      logger.success('Все проверки прошли после исправлений!');
+    } else {
+      logger.warn(`Остались ошибки в ${stillFailed.length} проверках — ручное вмешательство может потребоваться.`);
     }
   } catch (err) {
-    spinner.fail('Ошибка AI-фикса');
-    logger.error((err as Error).message);
+    logger.error(`Ошибка AI-фикса: ${(err as Error).message}`);
   }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-function parseFileBlocks(text: string): { path: string; content: string }[] {
-  const result: { path: string; content: string }[] = [];
-  const re = /<file\s+path="([^"]+)">([\s\S]*?)<\/file>/g;
-  for (const m of text.matchAll(re)) {
-    result.push({ path: m[1].trim(), content: m[2].trim() + '\n' });
-  }
-  return result;
-}
 
 function printResultsTable(results: BuildResult[]): void {
   const lines: string[] = [''];

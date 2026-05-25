@@ -313,13 +313,25 @@ export class DeepSeekClient {
     model?: string,
     options: ChatOptions = {},
     maxRounds = 10
-  ): Promise<{ messages: Message[]; finalContent: string }> {
+  ): Promise<{ messages: Message[]; finalContent: string; totalUsage: TokenUsage }> {
     const msgs = [...messages];
     let round = 0;
+    const totalUsage: TokenUsage = { promptTokens: 0, completionTokens: 0 };
 
     while (round < maxRounds) {
       const response = await this.chat(msgs, model, { ...options, tools, onRetry: options.onRetry });
       round++;
+
+      if (response.usage) {
+        totalUsage.promptTokens += response.usage.promptTokens;
+        totalUsage.completionTokens += response.usage.completionTokens;
+        if (response.usage.cacheHitTokens) {
+          totalUsage.cacheHitTokens = (totalUsage.cacheHitTokens ?? 0) + response.usage.cacheHitTokens;
+        }
+        if (response.usage.cacheMissTokens) {
+          totalUsage.cacheMissTokens = (totalUsage.cacheMissTokens ?? 0) + response.usage.cacheMissTokens;
+        }
+      }
 
       msgs.push({
         role: 'assistant',
@@ -329,7 +341,7 @@ export class DeepSeekClient {
       });
 
       if (!response.toolCalls || response.toolCalls.length === 0) {
-        return { messages: msgs, finalContent: response.content ?? '' };
+        return { messages: msgs, finalContent: response.content ?? '', totalUsage };
       }
 
       for (const tc of response.toolCalls) {
@@ -345,9 +357,12 @@ export class DeepSeekClient {
       }
     }
 
-    // maxRounds exhausted — find the last assistant message to return as finalContent
-    const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant');
-    return { messages: msgs, finalContent: (lastAssistant?.content ?? '') as string };
+    // maxRounds exhausted — find the last assistant message with text content
+    const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant' && m.content);
+    if (!lastAssistant?.content) {
+      logger.warn(`Tool loop exhausted ${maxRounds} rounds without a final text response — partial output returned`);
+    }
+    return { messages: msgs, finalContent: (lastAssistant?.content ?? '') as string, totalUsage };
   }
 
   // Streams responses, executes tool calls, streams final answer in real-time.

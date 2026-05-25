@@ -12,6 +12,8 @@ export interface DidevConfig {
     provider: 'deepseek';
     apiKey: string;
     model: string;
+    /** Optional cheaper/faster model for review agents (Reviewer, Tester, PerformanceAuditor) */
+    fastModel?: string;
     maxTokens: number;
     temperature: number;
     baseUrl?: string;

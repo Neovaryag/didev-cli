@@ -2,11 +2,21 @@ import { BaseAgent } from './base-agent.js';
 import type { ProjectContext } from '../core/context.js';
 import { contextToSystemPrompt } from '../core/context.js';
 
+const DEV_AGENT_NAMES = ['Developer', 'Frontend Developer', 'Backend Developer'] as const;
+const ARCH_AND_DEV_NAMES = [
+  'Architect', 'Frontend Architect', 'Backend Architect',
+  'Developer', 'Frontend Developer', 'Backend Developer',
+] as const;
+
 export class ReviewerAgent extends BaseAgent {
   readonly name = 'Reviewer';
   readonly role = 'Code Review & Quality';
   readonly emoji = '🔍';
   readonly description = 'Проверяет код на качество, SOLID, потенциальные баги и соответствие паттернам проекта';
+
+  // Only the developer output is needed for code review — not analyst/architect noise
+  protected get contextAgentNames() { return DEV_AGENT_NAMES; }
+  override get preferFastModel() { return true; }
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a senior Code Reviewer with expertise in ${ctx.language} and ${ctx.framework}.
@@ -45,6 +55,9 @@ export class SecurityAuditorAgent extends BaseAgent {
   readonly role = 'Security Analysis';
   readonly emoji = '🔒';
   readonly description = 'Аудит OWASP Top 10: SQL injection, broken auth, sensitive data exposure, XSS';
+
+  // Security audit needs arch context (to understand auth design) + developer output
+  protected get contextAgentNames() { return ARCH_AND_DEV_NAMES; }
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a Security Engineer performing a security audit.

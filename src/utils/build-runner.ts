@@ -67,10 +67,10 @@ async function fileExists(p: string): Promise<boolean> {
   return access(p).then(() => true).catch(() => false);
 }
 
-function npmOrPnpm(rootDir: string): Promise<'pnpm' | 'npm' | 'yarn'> {
-  return readFile(join(rootDir, 'pnpm-lock.yaml')).then(() => 'pnpm' as const)
-    .catch(() => readFile(join(rootDir, 'yarn.lock')).then(() => 'yarn' as const)
-    .catch(() => 'npm' as const));
+async function npmOrPnpm(rootDir: string): Promise<'pnpm' | 'npm' | 'yarn'> {
+  if (await fileExists(join(rootDir, 'pnpm-lock.yaml'))) return 'pnpm';
+  if (await fileExists(join(rootDir, 'yarn.lock'))) return 'yarn';
+  return 'npm';
 }
 
 async function detectNodeScripts(rootDir: string): Promise<BuildScript[]> {

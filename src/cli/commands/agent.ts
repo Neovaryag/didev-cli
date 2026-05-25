@@ -36,7 +36,8 @@ export async function runAgentCommand(
   await runOrchestration({
     task: task!,
     family: options.type ?? 'auto',
-    mode: options.mode ?? 'full',
+    // Don't pass mode when unset — lets inferMode() in the orchestrator pick the leanest pipeline
+    ...(options.mode ? { mode: options.mode } : {}),
     model: options.model,
     skipAgents: skipAgents.length > 0 ? skipAgents : undefined,
   });

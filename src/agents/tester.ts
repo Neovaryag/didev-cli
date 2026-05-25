@@ -2,11 +2,16 @@ import { BaseAgent } from './base-agent.js';
 import type { ProjectContext } from '../core/context.js';
 import { contextToSystemPrompt } from '../core/context.js';
 
+const DEV_AGENT_NAMES = ['Developer', 'Frontend Developer', 'Backend Developer'] as const;
+
 export class TesterAgent extends BaseAgent {
   readonly name = 'Tester';
   readonly role = 'Test Writing';
   readonly emoji = '🧪';
   readonly description = 'Генерирует юнит и интеграционные тесты, покрывает критические пути и edge cases';
+
+  protected get contextAgentNames() { return DEV_AGENT_NAMES; }
+  override get preferFastModel() { return true; }
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     const testFramework = ctx.dependencies.dev.includes('vitest') ? 'Vitest'
@@ -48,6 +53,9 @@ export class PerformanceAuditorAgent extends BaseAgent {
   readonly role = 'Performance Analysis';
   readonly emoji = '⚡';
   readonly description = 'Ищет узкие места, N+1 запросы, утечки памяти и возможности кэширования';
+
+  protected get contextAgentNames() { return DEV_AGENT_NAMES; }
+  override get preferFastModel() { return true; }
 
   protected buildSystemPrompt(ctx: ProjectContext): string {
     return `You are a Performance Engineer analyzing a ${ctx.type} ${ctx.framework} application.

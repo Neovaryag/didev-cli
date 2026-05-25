@@ -281,7 +281,7 @@ function printTokenUsage(usage: { promptTokens: number; completionTokens: number
 }
 
 function buildUsageBar(pct: number, width: number): string {
-  const filled = Math.round((pct / 100) * width);
+  const filled = Math.max(0, Math.min(width, Math.round((pct / 100) * width)));
   return '[' + '█'.repeat(filled) + '░'.repeat(width - filled) + ']';
 }
 

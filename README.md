@@ -180,15 +180,21 @@ didev agent --skip Tester "Quick feature"
 **Orchestration modes:**
 | Mode | Pipeline |
 |------|----------|
-| `full` | Analyst → Architect → Developer → [Reviewer ∥ Tester] |
+| `full` | Analyst → Architect → Developer → [Reviewer ∥ SecurityAuditor ∥ Tester ∥ PerformanceAuditor] |
 | `light` | Analyst → Developer → Reviewer |
 | `developer-only` | Developer only |
 
-> В режиме `full` стадия Reviewer и Tester выполняется **параллельно** — это сокращает общее время пайплайна.
+> В режиме `full` стадия ревью выполняется **параллельно** (все 4 агента одновременно) — это сокращает общее время пайплайна.  
+> Reviewer, Tester и PerformanceAuditor автоматически используют быструю модель (`api.fastModel`), если она задана в конфиге.
 
 #### Agent feedback loop
 
-When you reject an agent's file writes, you can provide corrections inline. The Developer agent re-runs with your feedback (up to 3 rounds) without losing the Analyst/Architect context from earlier pipeline stages.
+When you reject an agent's file writes, you can provide corrections inline. Up to 3 re-run rounds are supported:
+
+- **Regular feedback** → Developer agent re-runs with your corrections
+- **Architectural feedback** (keywords: *architecture, structure, pattern, approach, design*) → Architect re-runs first, then Developer gets the updated architecture plan
+
+Context from earlier pipeline stages (Analyst/Architect) is preserved across all feedback rounds.
 
 ---
 
@@ -304,7 +310,7 @@ Think of it like a craftsman's workshop: each wall holds tools for a specific tr
 | Tester | Unit + integration tests |
 
 ### Fullstack Family
-Analyst → Architect → Developer → Reviewer → Tester (cross-cutting)
+Analyst → Architect → Developer → [SecurityAuditor ∥ Reviewer ∥ Tester ∥ PerformanceAuditor]
 
 ---
 
@@ -371,6 +377,7 @@ api:
   provider: deepseek
   apiKey: ${DEEPSEEK_API_KEY}
   model: deepseek-v4-flash
+  # fastModel: deepseek-v4-flash   # optional: cheaper model for Reviewer/Tester/PerformanceAuditor
   maxTokens: 32768
   temperature: 0.3
   baseUrl: https://api.deepseek.com/v1
@@ -382,7 +389,7 @@ context:
   excludePatterns: [node_modules/**, dist/**, .git/**, "*.lock"]
 
 agents:
-  family: full        # full | light | developer-only
+  family: full        # full | light | custom
   orchestrate: true
   reviewRequired: true
   autoApply: false    # prompt before writing files
@@ -466,11 +473,11 @@ src/
 | **Таймауты** | API запросы, MCP, git, run_command | 90s stream, 60s run_command, 20–90s MCP connect (90s для npx) |
 | **Retry с backoff** | DeepSeek API | 5 попыток, экспоненциальный backoff + jitter, только транзитные ошибки |
 | **Graceful shutdown** | SIGTERM / SIGINT | Закрывает MCP серверы, 5s на очистку, затем force exit |
-| **Параллельный review** | Orchestrator full mode | Reviewer + Tester запускаются одновременно |
+| **Параллельный review** | Orchestrator full mode | SecurityAuditor + Reviewer + Tester + PerformanceAuditor запускаются одновременно |
 | **Лимит файлов** | file-manager | Отказ записи если файл >10MB |
 | **Безопасные пути** | file-manager | `assertSafePath` — блок path traversal (`../../`) |
 | **Идемпотентный MCP** | McpManager | `connectAll` безопасно вызывается несколько раз — дублей нет |
-| **Feedback loop** | Orchestrator | До 3 итераций Developer при отклонении изменений пользователем |
+| **Feedback loop** | Orchestrator | До 3 итераций; Developer + Architect (при архитектурных правках) при отклонении изменений |
 | **Логирование ошибок** | config, context, session | Все `catch` логируют через `logger.warn/debug` |
 
 ---

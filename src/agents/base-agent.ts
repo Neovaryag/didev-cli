@@ -1,19 +1,36 @@
 import chalk from 'chalk';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { DeepSeekClient, initClient } from '../core/api.js';
-import type { Message, Tool, ToolCall } from '../core/api.js';
-import { readProjectFile, writeProjectFile, listDirectory } from '../core/file-manager.js';
+import { DeepSeekClient } from '../core/api.js';
+import type { Message, Tool, ToolCall, TokenUsage } from '../core/api.js';
+import { readProjectFile, writeProjectFile } from '../core/file-manager.js';
 import type { ProjectContext } from '../core/context.js';
 import { contextToSystemPrompt } from '../core/context.js';
 import { logger } from '../utils/logger.js';
 import { getMcpManager } from '../core/mcp.js';
-import { getChangedFiles, getDiff } from '../utils/git.js';
+import { getDiff } from '../utils/git.js';
 import { glob } from 'glob';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 
 const execAsync = promisify(exec);
+
+// Strip verbose INFO lines from Maven/Gradle output so errors reach the LLM
+// within the 40k output budget.
+function filterBuildOutput(output: string): string {
+  const lines = output.split('\n');
+  // Keep: ERROR, WARN, test failures, stack traces, blank lines after errors
+  const kept: string[] = [];
+  let prevWasError = false;
+  for (const line of lines) {
+    const isNoise = /^\[INFO\]\s*(---|Scanning for|Building |Reactor |Downloaded from|Downloading from|Building jar|Replacing main artifact|Tests run: 0|BUILD SUCCESS)/.test(line);
+    if (isNoise && !prevWasError) continue;
+    kept.push(line);
+    prevWasError = /\[ERROR\]|\[WARN\]|FAILED|Exception|Error:|at [\w.$]+\(/.test(line);
+  }
+  // If heavy filtering left less than half, return filtered; otherwise return original
+  return kept.length < lines.length * 0.9 ? kept.join('\n') : output;
+}
 
 export interface AgentResult {
   agentName: string;
@@ -24,6 +41,7 @@ export interface AgentResult {
   fileChanges: FileChange[];
   pendingWrites: Map<string, { content: string; description?: string }>;
   duration: number;
+  tokenUsage?: TokenUsage;
 }
 
 export interface AgentArtifact {
@@ -47,6 +65,8 @@ export interface StepInfo {
 export interface AgentOptions {
   client: DeepSeekClient;
   model: string;
+  /** Fast/cheap model to use for agents that set preferFastModel=true */
+  fastModel?: string;
   projectContext: ProjectContext;
   rootDir: string;
   task: string;
@@ -157,6 +177,15 @@ export abstract class BaseAgent {
   abstract readonly description: string;
   protected abstract buildSystemPrompt(ctx: ProjectContext, task: string): string;
 
+  /** Set to true to prefer the fast/cheap model (deepseek-v4-flash or config.api.fastModel) */
+  get preferFastModel(): boolean { return false; }
+
+  /**
+   * Override to restrict which previous agent outputs appear in this agent's user message.
+   * Return an array of agent names to include, or undefined to include all.
+   */
+  protected get contextAgentNames(): readonly string[] | undefined { return undefined; }
+
   protected pendingWrites = new Map<string, { content: string; description?: string }>();
 
   private toolLabel(name: string, args: Record<string, unknown>): string {
@@ -204,6 +233,7 @@ export abstract class BaseAgent {
     ];
 
     let output = '';
+    let agentTokenUsage: TokenUsage | undefined;
     const fileChanges: FileChange[] = [];
     // In dry-run mode writes go here; otherwise they are applied immediately
     const pendingWrites = new Map<string, { content: string; description?: string }>();
@@ -213,7 +243,7 @@ export abstract class BaseAgent {
     const allTools: Tool[] = [...AGENT_TOOLS, ...mcp.tools];
 
     try {
-      const { messages: finalMsgs, finalContent } = await client.runToolLoop(
+      const { messages: finalMsgs, finalContent, totalUsage } = await client.runToolLoop(
         messages,
         allTools,
         async (name, args) => {
@@ -234,10 +264,11 @@ export abstract class BaseAgent {
             if (!spinner.isSpinning) spinner.start();
           },
         },
-        options.maxRounds ?? 10
+        options.maxRounds ?? 12
       );
 
       output = finalContent ?? '';
+      agentTokenUsage = totalUsage;
       spinner.stop();
 
       // Display output
@@ -289,6 +320,7 @@ export abstract class BaseAgent {
       fileChanges,
       pendingWrites,
       duration: Date.now() - start,
+      tokenUsage: agentTokenUsage,
     };
   }
 
@@ -296,11 +328,25 @@ export abstract class BaseAgent {
     let msg = `Task: ${task}`;
 
     if (previousResults && previousResults.length > 0) {
-      msg += '\n\n## Previous Agent Outputs\n';
-      for (const r of previousResults) {
-        msg += `\n### ${r.agentName} (${r.role})\n${r.output.slice(0, 40_000)}\n`;
-        if (r.fileChanges.length > 0) {
-          msg += `\nFiles created: ${r.fileChanges.map(f => f.path).join(', ')}\n`;
+      // Apply contextAgentNames filter — review agents only need developer output, not analyst/architect
+      const filter = this.contextAgentNames;
+      const relevant = filter
+        ? previousResults.filter(r => filter.includes(r.agentName))
+        : previousResults;
+
+      if (relevant.length > 0) {
+        msg += '\n\n## Previous Agent Outputs\n';
+        for (const r of relevant) {
+          msg += `\n### ${r.agentName} (${r.role})\n${r.output.slice(0, 30_000)}\n`;
+          if (r.fileChanges.length > 0) {
+            msg += `\nFiles written: ${r.fileChanges.map(f => f.path).join(', ')}\n`;
+          }
+          if (r.pendingWrites.size > 0) {
+            msg += `\nFiles prepared (pending apply):\n`;
+            for (const [path, { content }] of r.pendingWrites) {
+              msg += `\n#### ${path}\n\`\`\`\n${content.slice(0, 8_000)}\n\`\`\`\n`;
+            }
+          }
         }
       }
     }
@@ -397,14 +443,17 @@ export abstract class BaseAgent {
 
       case 'run_command': {
         const cmd = String(args['command']);
+        // Build-like commands (mvn, gradle, tsc, test suites) can run for minutes
+        const isBuildLike = /mvn|gradle|gradlew|tsc|typecheck|vitest|jest|pytest|cargo\s+build|go\s+(build|test)/i.test(cmd);
+        const timeout = isBuildLike ? 300_000 : 60_000;
         try {
-          const { stdout, stderr } = await execAsync(cmd, { cwd: rootDir, timeout: 60_000 });
+          const { stdout, stderr } = await execAsync(cmd, { cwd: rootDir, timeout });
           const out = [stdout, stderr].filter(Boolean).join('\n').trim();
-          return out.slice(0, 40_000) || '(no output)';
+          return filterBuildOutput(out).slice(0, 40_000) || '(no output)';
         } catch (e) {
           const err = e as { stdout?: string; stderr?: string; message: string };
           const out = [err.stdout, err.stderr, err.message].filter(Boolean).join('\n').trim();
-          return out.slice(0, 40_000) || 'Command failed';
+          return filterBuildOutput(out).slice(0, 40_000) || 'Command failed';
         }
       }
 
